@@ -1,0 +1,54 @@
+[project]
+name = "AutoLabelWithYolo"
+version = "0.1.0"
+description = "自动标注工具-Yolo模型"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.5",
+    "numpy>=2.3.2",
+    "opencv-python>=4.11.0.86",
+    "pyside6>=6.9.1",
+    "ultralytics>=8.3.183",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch>=2.3.1",
+    "torchvision"
+]
+cuda = [
+    "torch>=2.3.1",
+    "torchvision"
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cuda" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
