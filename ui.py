@@ -1,20 +1,20 @@
-import sys
 import os
+
 import cv2
+import torch
+from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QTimer)
+from PySide6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QFont,
+                           QAction)
 from PySide6.QtWidgets import (QMainWindow, QPushButton, QLabel, QFileDialog,
                                QVBoxLayout, QHBoxLayout, QWidget, QCheckBox,
                                QProgressBar, QListWidget, QSplitter, QMessageBox,
                                QInputDialog, QListWidgetItem, QGroupBox, QFormLayout,
-                               QComboBox, QLineEdit, QMenuBar, QMenu, QDialog,
+                               QMenu, QDialog,
                                QTableWidget, QTableWidgetItem, QHeaderView,
                                QAbstractItemView, QToolBar, QColorDialog)
-from PySide6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QFont,
-                           QIcon, QAction, QKeyEvent)
-from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QThread, QTimer,
-                            Slot)
+from ultralytics import YOLO
 
 from project import Project
-from annotation import AnnotationThread
 from utils import generate_distinct_colors
 
 
@@ -137,7 +137,7 @@ class ClassManagementDialog(QDialog):
     def edit_class(self):
         """编辑选中的标签"""
         current_row = self.class_table.currentRow()
-        if current_row >= 0 and current_row < len(self.class_names):
+        if 0 <= current_row < len(self.class_names):
             old_name = self.class_names[current_row]
             new_name, ok = QInputDialog.getText(
                 self, "编辑标签", "请输入新的标签名称:", text=old_name)
@@ -148,7 +148,7 @@ class ClassManagementDialog(QDialog):
     def change_color(self):
         """修改选中标签的颜色"""
         current_row = self.class_table.currentRow()
-        if current_row >= 0 and current_row < len(self.class_names):
+        if 0 <= current_row < len(self.class_names):
             current_color = self.class_colors[current_row]
             # 打开颜色选择对话框
             color = QColorDialog.getColor(
@@ -162,7 +162,7 @@ class ClassManagementDialog(QDialog):
     def remove_class(self):
         """删除选中的标签"""
         current_row = self.class_table.currentRow()
-        if current_row >= 0 and current_row < len(self.class_names):
+        if 0 <= current_row < len(self.class_names):
             reply = QMessageBox.question(
                 self, "确认删除",
                 f"确定要删除标签 '{self.class_names[current_row]}' 吗?",
@@ -539,7 +539,7 @@ class YOLOAnnotationTool(QMainWindow):
         # 在__init__中定义所有实例属性
         self.current_project = None
         self.current_image_idx = -1
-        self.annotation_thread = None
+        self.current_process_idx = -1
 
         # UI组件
         self.project_info_group = None
@@ -571,6 +571,8 @@ class YOLOAnnotationTool(QMainWindow):
         self.next_btn = None
         self.save_btn = None
         self.export_all_btn = None
+
+        self.model = None
 
         self.init_ui()
 
@@ -856,7 +858,7 @@ class YOLOAnnotationTool(QMainWindow):
         # 设置初始标签和颜色（新增部分）
         self.current_project.class_names = class_names
         self.current_project.class_colors = generate_distinct_colors(len(class_names))
-
+        self.current_process_idx = self.current_project.last_processed_index
         self.current_image_idx = -1
         self.update_project_info()
         self.update_image_list()
@@ -890,6 +892,7 @@ class YOLOAnnotationTool(QMainWindow):
         self.current_project = Project()
         if self.current_project.load(project_path):
             # 恢复上次处理的位置
+            self.current_process_idx = self.current_project.last_processed_index
             self.current_image_idx = self.current_project.last_processed_index
             self.update_project_info()
             self.update_image_list()
@@ -1065,31 +1068,111 @@ class YOLOAnnotationTool(QMainWindow):
         return ready
 
     def start_processing(self):
-        """开始处理图片"""
+        """开始处理图片（从当前位置开始）"""
         if not self.current_project or not self.check_process_ready():
             return
 
-        # 禁用按钮
         self.set_widgets_enabled(False)
+        self.current_process_idx = self.current_project.last_processed_index
+        self.process_next_image()  # 开始处理第一张
 
-        # 确定开始处理的位置（从上次处理的位置继续）
-        start_idx = self.current_project.last_processed_index
-        images_to_process = self.current_project.image_paths[start_idx:]
-
-        if not images_to_process:
-            QMessageBox.information(self, "提示", "所有图片已处理完毕")
-            self.set_widgets_enabled(True)
+    def process_next_image(self):
+        """处理下一张图片"""
+        # 检查是否所有图片都已处理
+        if self.current_process_idx >= len(self.current_project.image_paths):
+            self.on_processing_finished()
             return
 
-        # 启动标注线程
-        self.annotation_thread = AnnotationThread(
-            images_to_process,
-            self.current_project.model_path,
-            self.current_project.class_names)
-        self.annotation_thread.progress_updated.connect(self.update_progress)
-        self.annotation_thread.image_processed.connect(self.on_image_processed)
-        self.annotation_thread.finished.connect(self.on_processing_finished)
-        self.annotation_thread.start()
+        # 更新进度条
+        total = len(self.current_project.image_paths)
+        progress = int((self.current_process_idx / total) * 100)
+        self.progress_bar.setValue(progress)
+
+        # 获取当前要处理的图片路径
+        current_image_path = self.current_project.image_paths[self.current_process_idx]
+
+        # 如果已处理过则跳过
+        if current_image_path in self.current_project.processed_images:
+            self.current_process_idx += 1
+            # 允许UI更新后再继续处理下一张
+            QTimer.singleShot(10, self.process_next_image)
+            return
+
+        try:
+            # 直接在主线程处理图片
+            image, annotations = self.process_single_image(current_image_path)
+            self.on_single_image_processed(current_image_path, annotations)
+        except Exception as e:
+            error_msg = f"处理失败: {str(e)}"
+            print(f"图片 {current_image_path} 处理错误: {error_msg}")
+            QMessageBox.warning(self, "处理错误", f"处理 {os.path.basename(current_image_path)} 时出错:\n{error_msg}")
+            self.current_process_idx += 1
+            QTimer.singleShot(10, self.process_next_image)
+
+    def process_single_image(self, image_path):
+        """处理单张图片的核心逻辑"""
+        # 初始化模型（确保只初始化一次）
+        if not hasattr(self, 'model') or self.model is None:
+            try:
+                self.model = YOLO(self.current_project.model_path)
+                self.model.to(device="cuda" if torch.cuda.is_available() else "cpu")
+            except Exception as e:
+                raise Exception(f"模型加载失败: {str(e)}")
+
+        # 处理图片
+        image = cv2.imread(image_path)
+        if image is None:
+            raise Exception("无法读取图片文件")
+
+        results = self.model(image)
+        torch.cuda.empty_cache()
+        annotations = []
+
+        for result in results:
+            boxes = result.boxes.cpu().numpy()
+            model_names = result.names
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0]
+                conf = box.conf[0]
+                cls = int(box.cls[0])
+                class_name = model_names[cls]
+                if class_name in self.current_project.class_names:
+                    annotations.append({
+                        "box": (int(x1), int(y1), int(x2), int(y2)),
+                        "confidence": float(conf),
+                        "class_id": int(cls),
+                        "class": class_name
+                    })
+
+        return image, annotations
+
+    def on_single_image_processed(self, image_path, annotations):
+        """单张图片处理完成回调"""
+        # 更新项目状态
+        self.current_project.processed_images[image_path] = (None, annotations)
+        self.current_project.process_status[image_path] = "processed"
+        self.current_project.last_processed_index = self.current_process_idx
+        self.update_image_list()
+
+        # 显示当前处理的图片（如果需要人工复判）
+        if self.current_project.review_required:
+            self.current_image_idx = self.current_process_idx
+            self.show_current_image()
+            self.set_widgets_enabled(True)
+            self.complete_btn.setEnabled(True)
+            return  # 等待人工操作后再继续
+
+        # 不需要复判则直接处理下一张
+        self.current_process_idx += 1
+        # 使用QTimer让UI有时间更新
+        QTimer.singleShot(10, self.process_next_image)
+
+    def on_process_error(self, image_path, error_msg):
+        """处理错误回调"""
+        print(f"图片 {image_path} 处理错误: {error_msg}")
+        QMessageBox.warning(self, "处理错误", f"处理 {os.path.basename(image_path)} 时出错:\n{error_msg}")
+        self.current_process_idx += 1
+        self.process_next_image()  # 继续处理下一张
 
     def update_progress(self, value):
         """更新进度条"""
@@ -1101,12 +1184,12 @@ class YOLOAnnotationTool(QMainWindow):
             value * len(self.current_project.image_paths[start_idx:]) / total / 100)
         self.progress_bar.setValue(current)
 
-    def on_image_processed(self, image_path, image, annotations):
+    def on_image_processed(self, image_path, annotations):
         """处理完一张图片后的回调"""
         if not self.current_project:
             return
 
-        self.current_project.processed_images[image_path] = (image, annotations)
+        self.current_project.processed_images[image_path] = (None, annotations)
         self.current_project.process_status[image_path] = "processed"
 
         # 更新图片列表状态
@@ -1119,10 +1202,6 @@ class YOLOAnnotationTool(QMainWindow):
 
             # 如果需要人工复判，显示当前图片并暂停处理
             if self.current_project.review_required:
-                # 暂停线程
-                if self.annotation_thread:
-                    self.annotation_thread.pause()
-
                 # 显示当前图片
                 self.show_current_image()
                 self.update_nav_buttons()
@@ -1131,6 +1210,7 @@ class YOLOAnnotationTool(QMainWindow):
 
     def on_processing_finished(self):
         """所有图片处理完成后的回调"""
+        self.progress_bar.setValue(100)
         # 启用按钮
         self.set_widgets_enabled(True)
         self.save_project()  # 保存处理结果
@@ -1174,6 +1254,7 @@ class YOLOAnnotationTool(QMainWindow):
                 if item.data(Qt.ItemDataRole.UserRole) == image_path:
                     self.image_list.setCurrentItem(item)
                     break
+            self.image_editor.update()
 
     def on_image_double_clicked(self, item):
         """双击图片列表项"""
@@ -1230,24 +1311,14 @@ class YOLOAnnotationTool(QMainWindow):
         self.save_current_annotation()
         self.update_image_list()
 
-        # 移动到下一张
+        # 移动到下一张并继续处理
         if self.current_image_idx < len(self.current_project.image_paths) - 1:
-            self.current_image_idx += 1
-            self.current_project.last_processed_index = self.current_image_idx
-
-            # 检查下一张是否已处理
-            next_image_path = self.current_project.image_paths[self.current_image_idx]
-            if next_image_path in self.current_project.processed_images:
-                # 已处理，直接显示
-                self.show_current_image()
-                self.update_nav_buttons()
-            else:
-                # 未处理，自动处理
-                self.start_processing()
+            self.current_process_idx = self.current_image_idx + 1
+            self.current_project.last_processed_index = self.current_process_idx
+            self.set_widgets_enabled(False)
+            self.process_next_image()  # 继续自动处理
         else:
-            # 已经是最后一张
             QMessageBox.information(self, "完成", "所有图片已处理完毕")
-            self.current_image_idx = len(self.current_project.image_paths) - 1
             self.update_nav_buttons()
 
     def on_annotation_updated(self, annotations):
@@ -1293,19 +1364,6 @@ class YOLOAnnotationTool(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭事件"""
-        # 检查是否正在处理
-        if self.annotation_thread and self.annotation_thread.isRunning():
-            reply = QMessageBox.question(self, "确认",
-                                         "正在处理图片，确定要退出吗？",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                self.annotation_thread.stop()
-                event.accept()
-            else:
-                event.ignore()
-                return
-
         # 检查是否需要保存项目
         if self.current_project:
             reply = QMessageBox.question(self, "保存项目",
