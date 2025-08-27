@@ -294,7 +294,7 @@ class ImageEditor(QLabel):
             idx = self.class_names.index(class_name)
             return self.class_colors[idx]
         except ValueError:
-            return (0, 255, 0)  # 默认绿色
+            return 0, 255, 0  # 默认绿色
 
     def paintEvent(self, event):
         """绘制事件，用于显示图片和带颜色的标注框"""
@@ -351,7 +351,7 @@ class ImageEditor(QLabel):
                              f"{annot['class']} ({annot['confidence']:.2f})")
 
         # 如果有选中的框，绘制控制点
-        if self.current_box_idx >= 0 and self.current_box_idx < len(self.annotations):
+        if 0 <= self.current_box_idx < len(self.annotations):
             annot = self.annotations[self.current_box_idx]
             x1, y1, x2, y2 = annot["box"]
             x1_scaled = x1 * scale_x
@@ -1141,7 +1141,7 @@ class YOLOAnnotationTool(QMainWindow):
         try:
             # 直接在主线程处理图片
             image, annotations = self.process_single_image(current_image_path)
-            self.on_single_image_processed(current_image_path, annotations)
+            self.on_single_image_processed(current_image_path, image, annotations)
         except Exception as e:
             error_msg = f"处理失败: {str(e)}"
             print(f"图片 {current_image_path} 处理错误: {error_msg}")
@@ -1186,10 +1186,10 @@ class YOLOAnnotationTool(QMainWindow):
 
         return image, annotations
 
-    def on_single_image_processed(self, image_path, annotations):
+    def on_single_image_processed(self, image_path, image, annotations):
         """单张图片处理完成回调"""
         # 更新项目状态
-        self.current_project.processed_images[image_path] = (None, annotations)
+        self.current_project.processed_images[image_path] = (image, annotations)
         self.current_project.process_status[image_path] = "processed"
         self.current_project.last_processed_index = self.current_process_idx
         self.update_image_list()
@@ -1449,57 +1449,123 @@ class YOLOAnnotationTool(QMainWindow):
             return
         train_ratio, val_ratio, test_ratio = ratios
         # 创建目录结构
-        labeled_dir = os.path.join(self.current_project.output_dir, "labeled")
         unlabeled_dir = os.path.join(self.current_project.output_dir, "unlabeled")
-        train_dir = os.path.join(labeled_dir, "train")
-        val_dir = os.path.join(labeled_dir, "val")
-        test_dir = os.path.join(labeled_dir, "test")
-        for dir_path in [train_dir, val_dir, test_dir, unlabeled_dir]:
+        # 创建新的目录结构
+        base_dir = os.path.join(self.current_project.output_dir, "labeled")
+        # 有标注数据的目录结构 (images存放图片, labels存放标注文件)
+        train_img_dir = os.path.join(base_dir, "train", "images")
+        train_label_dir = os.path.join(base_dir, "train", "labels")
+        val_img_dir = os.path.join(base_dir, "val", "images")
+        val_label_dir = os.path.join(base_dir, "val", "labels")
+        test_img_dir = os.path.join(base_dir, "test", "images")
+        test_label_dir = os.path.join(base_dir, "test", "labels")
+
+        # 创建所有必要目录
+        for dir_path in [
+            unlabeled_dir,
+            train_img_dir, train_label_dir,
+            val_img_dir, val_label_dir,
+            test_img_dir, test_label_dir
+        ]:
             os.makedirs(dir_path, exist_ok=True)
-        # 分离已标注和未标注图片
+
+        # 分离有标注和无标注图片
         labeled_images = []
         unlabeled_images = []
         for image_path in self.current_project.image_paths:
-            if image_path in self.current_project.process_status and self.current_project.process_status[
-                image_path] in ["processed", "reviewed"]:
+            # 检查是否有标注信息且标注不为空
+            if (image_path in self.current_project.processed_images and
+                    self.current_project.processed_images[image_path][1]):  # [1]是标注数据
                 labeled_images.append(image_path)
             else:
                 unlabeled_images.append(image_path)
+
         # 随机打乱已标注图片顺序
         random.shuffle(labeled_images)
         total_labeled = len(labeled_images)
+
         # 计算各数据集数量
         train_count = int(total_labeled * train_ratio)
         val_count = int(total_labeled * val_ratio)
-        # 剩下的作为测试集
+
         # 分配图片到各个数据集
         train_images = labeled_images[:train_count]
         val_images = labeled_images[train_count:train_count + val_count]
         test_images = labeled_images[train_count + val_count:]
-        # 导出已标注图片及标注
-        all_labeled = [(train_images, train_dir), (val_images, val_dir), (test_images, test_dir)]
+
+        # 导出已标注图片及对应的标注文件
+        datasets = [
+            (train_images, train_img_dir, train_label_dir),
+            (val_images, val_img_dir, val_label_dir),
+            (test_images, test_img_dir, test_label_dir)
+        ]
+
         total = len(labeled_images) + len(unlabeled_images)
         current = 0
-        for images, dest_dir in all_labeled:
+
+        for images, img_dir, label_dir in datasets:
             for image_path in images:
-                # 导出标注结果
-                self.export_single_result(image_path, dest_dir)
-                # 复制原始图片
+                # 复制原始图片到对应images目录
                 img_filename = os.path.basename(image_path)
-                shutil.copy2(image_path, os.path.join(dest_dir, img_filename))
+                shutil.copy2(image_path, os.path.join(img_dir, img_filename))
+
+                # 生成并保存标注文件到对应labels目录
+                self.export_annotation_file(image_path, label_dir)
+
                 current += 1
                 self.progress_bar.setValue(int(current / total * 100))
+
         # 导出未标注图片
         for image_path in unlabeled_images:
             img_filename = os.path.basename(image_path)
             shutil.copy2(image_path, os.path.join(unlabeled_dir, img_filename))
             current += 1
             self.progress_bar.setValue(int(current / total * 100))
+
         QMessageBox.information(None, "完成",
-                                f"所有图片已导出到 {self.current_project.output_dir}\n"
-                                f"已标注: {len(labeled_images)} 张 (训练集: {len(train_images)}, 验证集: {len(val_images)}, 测试集: {len(test_images)})\n"
+                                f"所有图片已导出到 {base_dir}\n"
+                                f"已标注: {len(labeled_images)} 张 (训练集: {len(train_images)}, "
+                                f"验证集: {len(val_images)}, 测试集: {len(test_images)})\n"
                                 f"未标注: {len(unlabeled_images)} 张")
         self.progress_bar.setValue(0)
+
+    def export_annotation_file(self, image_path, label_dir):
+        """仅导出YOLO格式的标注文件（不生成带框图片）"""
+        if (not self.current_project or
+                image_path not in self.current_project.processed_images):
+            return
+
+        # 获取标注信息
+        image, annotations = self.current_project.processed_images[image_path]
+        if annotations is None:
+            return
+
+        if image is None:
+            image = cv2.imread(image_path)
+
+        # 获取图片尺寸用于坐标归一化
+        height, width = image.shape[:2]
+
+        # 生成标注文件名（与图片同名，后缀改为txt）
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        output_txt_path = os.path.join(label_dir, f"{base_name}.txt")
+
+        # 写入YOLO格式标注
+        with open(output_txt_path, "w", encoding="utf-8") as f:
+            for annot in annotations:
+                x1, y1, x2, y2 = annot["box"]
+                # 转换为YOLO格式：中心点坐标和宽高（归一化）
+                cx = (x1 + x2) / 2 / width
+                cy = (y1 + y2) / 2 / height
+                w = (x2 - x1) / width
+                h = (y2 - y1) / height
+
+                # 获取类别ID
+                class_id = 0
+                if annot["class"] in self.current_project.class_names:
+                    class_id = self.current_project.class_names.index(annot["class"])
+
+                f.write(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
 
     def show_about(self):
         """显示关于对话框"""
