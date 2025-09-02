@@ -609,7 +609,6 @@ class YOLOAnnotationTool(QMainWindow):
         self.btn_layout = None
         self.prev_btn = None
         self.next_btn = None
-        self.save_btn = None
         self.export_all_btn = None
 
         self.model = None
@@ -734,7 +733,6 @@ class YOLOAnnotationTool(QMainWindow):
 
         self.btn_layout.addWidget(self.prev_btn)
         self.btn_layout.addWidget(self.next_btn)
-        self.btn_layout.addWidget(self.save_btn)
         self.btn_layout.addWidget(self.export_all_btn)
 
         # 添加到主布局
@@ -845,8 +843,6 @@ class YOLOAnnotationTool(QMainWindow):
         self.prev_btn.setEnabled(enabled and self.current_image_idx > 0)
         self.next_btn.setEnabled(enabled and self.current_project and
                                  self.current_image_idx < len(self.current_project.image_paths) - 1)
-        self.save_btn.setEnabled((enabled and self.current_image_idx >= 0 and
-                                  self.current_project.output_dir != "") if self.current_project is not None else False)
         self.complete_btn.setEnabled((enabled and self.current_image_idx >= 0
                                       and self.current_project.review_required) if self.current_project is not None else False)
 
@@ -1082,7 +1078,6 @@ class YOLOAnnotationTool(QMainWindow):
             self.current_project.output_dir = dir_path
             self.output_dir_label.setText(dir_path)
             self.export_all_btn.setEnabled(len(self.current_project.processed_images) > 0)
-            self.save_btn.setEnabled(self.current_image_idx >= 0)
             self.save_project()  # 自动保存项目
 
     def on_review_toggled(self):
@@ -1283,7 +1278,6 @@ class YOLOAnnotationTool(QMainWindow):
 
             self.image_editor.set_image(image)
             self.image_editor.set_annotations(annotations)
-            self.save_btn.setEnabled(True)
 
             # 高亮显示列表中的当前项
             for i in range(self.image_list.count()):
