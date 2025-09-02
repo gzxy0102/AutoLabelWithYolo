@@ -382,7 +382,7 @@ class ImageEditor(QLabel):
         pos = event.pos()
         pixmap = self.pixmap()
         if pixmap.isNull():
-            return
+            return None
 
         # 计算缩放比例
         scale_x = pixmap.width() / self.image.shape[1]
@@ -727,9 +727,6 @@ class YOLOAnnotationTool(QMainWindow):
         self.next_btn.clicked.connect(self.next_image)
         self.next_btn.setEnabled(False)
 
-        self.save_btn = QPushButton("保存当前标注")
-        self.save_btn.clicked.connect(self.save_current_annotation)
-        self.save_btn.setEnabled(False)
 
         self.export_all_btn = QPushButton("导出所有结果")
         self.export_all_btn.clicked.connect(self.export_all_results)
@@ -1348,7 +1345,6 @@ class YOLOAnnotationTool(QMainWindow):
         # 标记为已审查
         image_path = self.current_project.image_paths[self.current_image_idx]
         self.current_project.process_status[image_path] = "reviewed"
-        self.save_current_annotation()
         self.update_image_list()
 
         # 移动到下一张并继续处理
@@ -1373,66 +1369,6 @@ class YOLOAnnotationTool(QMainWindow):
             image, _ = self.current_project.processed_images[image_path]
             self.current_project.processed_images[image_path] = (image, annotations)
             self.save_project()  # 自动保存修改
-
-    def save_current_annotation(self):
-        """保存当前图片的标注"""
-        if (not self.current_project or
-                self.current_image_idx < 0 or
-                self.current_image_idx >= len(self.current_project.image_paths) or
-                not self.current_project.output_dir):
-            return
-
-        image_path = self.current_project.image_paths[self.current_image_idx]
-        if image_path in self.current_project.processed_images:
-            self.export_single_result(image_path)
-            QMessageBox.information(self, "成功", f"已保存 {os.path.basename(image_path)} 的标注结果")
-
-    def export_single_result(self, image_path, dest_dir=None):
-        """导出单张图片的标注结果，包含彩色标注框"""
-        if (not self.current_project or
-                image_path not in self.current_project.processed_images):
-            return
-        # 如果未指定目标目录，使用项目的输出目录
-        if not dest_dir:
-            if not self.current_project.output_dir:
-                return
-            dest_dir = self.current_project.output_dir
-        image, annotations = self.current_project.processed_images[image_path]
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        # 保存标注后的图片，使用标签对应的颜色
-        img_with_anns = image.copy()
-        height, width = img_with_anns.shape[:2]
-        for annot in annotations:
-            x1, y1, x2, y2 = map(int, annot["box"])
-            class_name = annot["class"]
-            # 获取该标签的颜色
-            color = self.image_editor.get_class_color(class_name)
-            # 绘制边界框
-            cv2.rectangle(img_with_anns, (x1, y1), (x2, y2), color, 2)
-            # 绘制类别标签，文字颜色根据背景色自动调整
-            r, g, b = color
-            text_color = (0, 0, 0) if (r * 0.299 + g * 0.587 + b * 0.114) > 127 else (255, 255, 255)
-            cv2.putText(img_with_anns, class_name, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-            cv2.putText(img_with_anns, class_name, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 1)
-        output_image_path = os.path.join(dest_dir, f"{base_name}_annotated.jpg")
-        cv2.imwrite(output_image_path, img_with_anns)
-        # 保存YOLO格式的标注文件
-        output_txt_path = os.path.join(dest_dir, f"{base_name}.txt")
-        with open(output_txt_path, "w", encoding="utf-8") as f:
-            for annot in annotations:
-                x1, y1, x2, y2 = annot["box"]
-                # 转换为YOLO格式：中心点坐标和宽高（归一化）
-                cx = (x1 + x2) / 2 / width
-                cy = (y1 + y2) / 2 / height
-                w = (x2 - x1) / width
-                h = (y2 - y1) / height
-                # 获取类别ID，使用项目中的标签ID
-                class_id = 0
-                if annot["class"] in self.current_project.class_names:
-                    class_id = self.current_project.class_names.index(annot["class"])
-                f.write(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
 
     def export_all_results(self):
         """导出所有结果"""
