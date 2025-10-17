@@ -113,3 +113,19 @@ class Project:
         except Exception as e:
             print(f"加载项目失败: {e}")
             return False
+
+    def get_processed_count(self):
+        """获取已处理（processed或reviewed）的图片数量"""
+        return len([path for path in self.image_paths 
+                   if path in self.process_status and 
+                   self.process_status[path] in ["processed", "reviewed"]])
+
+    def get_total_count(self):
+        """获取图片总数"""
+        return len(self.image_paths)
+        
+    def get_reviewed_count(self):
+        """获取已审查的图片数量"""
+        return len([path for path in self.image_paths 
+                   if path in self.process_status and 
+                   self.process_status[path] == "reviewed"])
