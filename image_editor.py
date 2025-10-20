@@ -163,15 +163,18 @@ class ImageEditor(QLabel):
             font.setBold(True)
             font.setPointSize(10)
             painter.setFont(font)
-            text_width = len(annot["class"]) * 12
-            text_rect = QRect(int(x1_scaled), int(y1_scaled) - 20, text_width, 20)
+            # 使用QFontMetrics来准确计算文本宽度
+            font_metrics = painter.fontMetrics()
+            text = f"{annot['class']} ({annot['confidence']:.2f})"
+            text_width = font_metrics.horizontalAdvance(text)
+            text_height = font_metrics.height()
+            text_rect = QRect(int(x1_scaled), int(y1_scaled) - text_height, text_width + 4, text_height)
             painter.fillRect(text_rect, color)
             # 根据背景亮度自动选择文字颜色
             luminance = (r * 0.299 + g * 0.587 + b * 0.114)
             text_color = QColor(0, 0, 0) if luminance > 127 else QColor(255, 255, 255)
             painter.setPen(text_color)
-            painter.drawText(int(x1_scaled), int(y1_scaled) - 5,
-                             f"{annot['class']} ({annot['confidence']:.2f})")
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
 
         # 如果有选中的框，绘制控制点
         if 0 <= self.current_box_idx < len(self.annotations):
