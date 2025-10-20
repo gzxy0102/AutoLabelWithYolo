@@ -367,18 +367,6 @@ class ImageEditor(QLabel):
         self.update()
         return None
 
-    def perform_update(self):
-        """执行实际的更新操作"""
-        if self.pending_update:
-            # 如果有待处理的更新，重新启动定时器
-            self.update_timer.start(16)
-            self.pending_update = False
-        else:
-            # 执行更新
-            self.update()
-            if self.pending_annotations:
-                self.annotation_updated.emit(self.pending_annotations)
-
     def update_annotation_area(self, old_x1, old_y1, old_x2, old_y2, new_x1, new_y1, new_x2, new_y2, scale_x, scale_y, pixmap_x, pixmap_y):
         """只更新标注框区域以提高性能"""
         # 计算旧框和新框的屏幕坐标
