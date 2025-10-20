@@ -666,14 +666,6 @@ class YOLOAnnotationTool(QMainWindow):
             self.export_all_btn.setEnabled(len(self.current_project.processed_images) > 0)
             self.save_project()  # 自动保存项目
 
-    def on_review_toggled(self):
-        """人工复判选项变化"""
-        if self.current_project:
-            self.current_project.review_required = self.review_checkbox.isChecked()
-            self.complete_btn.setEnabled(self.current_image_idx >= 0 and
-                                         self.current_project.review_required)
-            self.save_project()  # 自动保存项目
-
     @property
     def is_process_ready(self):
         """检查是否可以开始处理"""
