@@ -55,18 +55,7 @@ class ClassManagementDialog(QDialog):
         # 在__init__中定义所有实例属性
         self.class_names = []
         self.class_colors = []
-        self.class_table = None
-        self.add_btn = None
-        self.edit_btn = None
-        self.color_btn = None
-        self.remove_btn = None
-        self.auto_color_btn = None
-        self.ok_btn = None
-        self.cancel_btn = None
 
-        self.init_ui(class_names, class_colors)
-
-    def init_ui(self, class_names, class_colors):
         self.setWindowTitle("标签管理")
         self.setGeometry(200, 200, 500, 300)
 
