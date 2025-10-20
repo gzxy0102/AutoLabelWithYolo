@@ -4,606 +4,19 @@ import shutil
 
 import cv2
 import torch
-from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QTimer)
-from PySide6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QFont,
-                           QAction)
+from PySide6.QtCore import (Qt, QTimer)
+from PySide6.QtGui import (QColor, QAction, QIcon)
 from PySide6.QtWidgets import (QMainWindow, QPushButton, QLabel, QFileDialog,
-                               QVBoxLayout, QHBoxLayout, QWidget, QCheckBox,
-                               QProgressBar, QListWidget, QSplitter, QMessageBox,
+                               QVBoxLayout, QHBoxLayout, QWidget, QProgressBar, QListWidget, QSplitter, QMessageBox,
                                QInputDialog, QListWidgetItem, QGroupBox, QFormLayout,
-                               QMenu, QDialog,
-                               QTableWidget, QTableWidgetItem, QHeaderView,
-                               QAbstractItemView, QToolBar, QColorDialog, QLineEdit, QDialogButtonBox)
+                               QDialog,
+                               QToolBar)
 from ultralytics import YOLO
 
+from dialogs import DatasetSplitDialog, ClassManagementDialog
+from image_editor import ImageEditor
 from project import Project
 from utils import generate_distinct_colors
-
-
-class DatasetSplitDialog(QDialog):
-    """数据集划分比例设置对话框"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("设置数据集划分比例")
-        # 默认比例 70%:15%:15%
-        self.train_ratio = QLineEdit("70")
-        self.val_ratio = QLineEdit("15")
-        self.test_ratio = QLineEdit("15")
-        layout = QFormLayout()
-        layout.addRow("训练集比例 (%):", self.train_ratio)
-        layout.addRow("验证集比例 (%):", self.val_ratio)
-        layout.addRow("测试集比例 (%):", self.test_ratio)
-        buttons = QDialogButtonBox()
-        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
-        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-
-    def get_ratios(self):
-        """获取用户设置的比例，返回小数形式"""
-        try:
-            train = float(self.train_ratio.text()) / 100
-            val = float(self.val_ratio.text()) / 100
-            test = float(self.test_ratio.text()) / 100
-            # 检查比例之和是否为100%左右（允许微小误差）
-            if not (0.99 <= train + val + test <= 1.01):
-                QMessageBox.warning(self, "比例错误", "比例之和必须为100%")
-                return None
-            return train, val, test
-        except ValueError:
-            QMessageBox.warning(self, "输入错误", "请输入有效的数字")
-            return None
-
-
-class ClassManagementDialog(QDialog):
-    """标签管理对话框，支持颜色设置"""
-
-    def __init__(self, class_names, class_colors, parent=None):
-        super().__init__(parent)
-
-        # 在__init__中定义所有实例属性
-        self.class_names = []
-        self.class_colors = []
-        self.class_table = None
-        self.add_btn = None
-        self.edit_btn = None
-        self.color_btn = None
-        self.remove_btn = None
-        self.auto_color_btn = None
-        self.ok_btn = None
-        self.cancel_btn = None
-
-        self.init_ui(class_names, class_colors)
-
-    def init_ui(self, class_names, class_colors):
-        self.setWindowTitle("标签管理")
-        self.setGeometry(200, 200, 500, 300)
-
-        self.class_names = class_names.copy()
-        # 确保颜色数量与标签数量一致
-        if len(class_colors) != len(class_names):
-            self.class_colors = generate_distinct_colors(len(class_names))
-        else:
-            self.class_colors = [tuple(color) for color in class_colors]
-
-        layout = QVBoxLayout()
-
-        # 标签列表
-        self.class_table = QTableWidget()
-        self.class_table.setColumnCount(3)
-        self.class_table.setHorizontalHeaderLabels(["ID", "标签名称", "颜色"])
-        # 修正QHeaderView.Stretch的引用
-        self.class_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        # 修正QAbstractItemView.NoEditTriggers的引用
-        self.class_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        # 设置列宽比例
-        self.class_table.setColumnWidth(0, 50)
-        self.class_table.setColumnWidth(2, 100)
-        layout.addWidget(self.class_table)
-
-        # 按钮布局
-        btn_layout = QHBoxLayout()
-
-        self.add_btn = QPushButton("添加标签")
-        self.add_btn.clicked.connect(self.add_class)
-        btn_layout.addWidget(self.add_btn)
-
-        self.edit_btn = QPushButton("编辑标签")
-        self.edit_btn.clicked.connect(self.edit_class)
-        btn_layout.addWidget(self.edit_btn)
-
-        self.color_btn = QPushButton("修改颜色")
-        self.color_btn.clicked.connect(self.change_color)
-        btn_layout.addWidget(self.color_btn)
-
-        self.remove_btn = QPushButton("删除标签")
-        self.remove_btn.clicked.connect(self.remove_class)
-        btn_layout.addWidget(self.remove_btn)
-
-        self.auto_color_btn = QPushButton("自动生成颜色")
-        self.auto_color_btn.clicked.connect(self.auto_generate_colors)
-        btn_layout.addWidget(self.auto_color_btn)
-
-        self.ok_btn = QPushButton("确定")
-        self.ok_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(self.ok_btn)
-
-        self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(self.cancel_btn)
-
-        layout.addLayout(btn_layout)
-        self.setLayout(layout)
-
-        self.update_table()
-
-    def update_table(self):
-        """更新标签表格，包括颜色显示"""
-        self.class_table.setRowCount(len(self.class_names))
-        for i, (class_name, color) in enumerate(zip(self.class_names, self.class_colors)):
-            # ID列
-            self.class_table.setItem(i, 0, QTableWidgetItem(str(i)))
-
-            # 标签名称列
-            self.class_table.setItem(i, 1, QTableWidgetItem(class_name))
-
-            # 颜色列 - 显示颜色方块
-            color_widget = QWidget()
-            color_layout = QHBoxLayout(color_widget)
-            color_layout.setContentsMargins(5, 5, 5, 5)
-
-            color_label = QLabel()
-            color_label.setFixedSize(30, 30)
-            color_label.setStyleSheet(
-                f"background-color: rgb({color[0]}, {color[1]}, {color[2]}); border: 1px solid #ccc;")
-
-            color_layout.addWidget(color_label)
-            color_layout.addStretch()
-            self.class_table.setCellWidget(i, 2, color_widget)
-
-    def add_class(self):
-        """添加新标签，自动生成颜色"""
-        class_name, ok = QInputDialog.getText(self, "添加标签", "请输入标签名称:")
-        if ok and class_name and class_name not in self.class_names:
-            self.class_names.append(class_name)
-            # 生成新的颜色
-            new_colors = generate_distinct_colors(len(self.class_names))
-            self.class_colors = new_colors
-            self.update_table()
-
-    def edit_class(self):
-        """编辑选中的标签"""
-        current_row = self.class_table.currentRow()
-        if 0 <= current_row < len(self.class_names):
-            old_name = self.class_names[current_row]
-            new_name, ok = QInputDialog.getText(
-                self, "编辑标签", "请输入新的标签名称:", text=old_name)
-            if ok and new_name and new_name not in self.class_names:
-                self.class_names[current_row] = new_name
-                self.update_table()
-
-    def change_color(self):
-        """修改选中标签的颜色"""
-        current_row = self.class_table.currentRow()
-        if 0 <= current_row < len(self.class_names):
-            current_color = self.class_colors[current_row]
-            # 打开颜色选择对话框
-            color = QColorDialog.getColor(
-                QColor(current_color[0], current_color[1], current_color[2]),
-                self, "选择标签颜色"
-            )
-            if color.isValid():
-                self.class_colors[current_row] = (color.red(), color.green(), color.blue())
-                self.update_table()
-
-    def remove_class(self):
-        """删除选中的标签"""
-        current_row = self.class_table.currentRow()
-        if 0 <= current_row < len(self.class_names):
-            reply = QMessageBox.question(
-                self, "确认删除",
-                f"确定要删除标签 '{self.class_names[current_row]}' 吗?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                del self.class_names[current_row]
-                del self.class_colors[current_row]
-                # 重新生成所有颜色，确保视觉差异
-                self.class_colors = generate_distinct_colors(len(self.class_names))
-                self.update_table()
-
-    def auto_generate_colors(self):
-        """为所有标签自动生成颜色"""
-        self.class_colors = generate_distinct_colors(len(self.class_names))
-        self.update_table()
-
-    def get_class_info(self):
-        """返回修改后的标签列表和颜色列表"""
-        return self.class_names, self.class_colors
-
-
-class ImageEditor(QLabel):
-    """图片编辑器，用于显示图片和编辑标注框，支持彩色标签"""
-    annotation_updated = Signal(list)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        # 在__init__中定义所有实例属性
-        self.image = None
-        self.q_image = None
-        self.annotations = []
-        self.class_names = []
-        self.class_colors = []
-        self.current_box_idx = -1
-        self.dragging = False
-        self.drag_handle = None  # None, 'top_left', 'top_right', 'bottom_left', 'bottom_right', 'center'
-        self.last_pos = QPoint()
-        self.box_offset = QPoint()
-
-        self.init_ui()
-
-    def init_ui(self):
-        self.setMinimumSize(640, 480)
-        # 修正Qt.AlignCenter的引用
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-    def set_image(self, image):
-        """设置显示的图片"""
-        self.image = image
-        self.update_q_image()
-        self.annotations = []
-        self.current_box_idx = -1
-        self.update()
-
-    def update_q_image(self):
-        """将OpenCV图像转换为Qt图像"""
-        if self.image is None:
-            self.q_image = None
-            return
-
-        height, width, channel = self.image.shape
-        bytes_per_line = 3 * width
-        rgb_image = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
-        self.q_image = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-        # 修正Qt.KeepAspectRatio和Qt.SmoothTransformation的引用
-        self.setPixmap(QPixmap.fromImage(self.q_image).scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-
-    def set_annotations(self, annotations):
-        """设置标注信息"""
-        self.annotations = annotations.copy()
-        self.current_box_idx = -1
-        self.update()
-
-    def set_class_info(self, class_names, class_colors):
-        """设置标签列表和对应的颜色"""
-        self.class_names = class_names.copy()
-        # 确保颜色数量与标签数量一致
-        if len(class_colors) != len(class_names):
-            self.class_colors = generate_distinct_colors(len(class_names))
-        else:
-            self.class_colors = class_colors.copy()
-
-    def get_class_color(self, class_name):
-        """获取标签对应的颜色，如果没有则返回默认颜色"""
-        try:
-            idx = self.class_names.index(class_name)
-            return self.class_colors[idx]
-        except ValueError:
-            return 0, 255, 0  # 默认绿色
-
-    def paintEvent(self, event):
-        """绘制事件，用于显示图片和带颜色的标注框"""
-        super().paintEvent(event)
-        if self.q_image is None or not self.annotations:
-            return
-
-        painter = QPainter(self)
-        # 修正QPainter.Antialiasing的引用
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # 计算缩放比例
-        pixmap = self.pixmap()
-        if pixmap.isNull():
-            return
-
-        # 计算图片在 QLabel 中的偏移量（居中显示时的偏移）
-        pixmap_x = (self.width() - pixmap.width()) // 2
-        pixmap_y = (self.height() - pixmap.height()) // 2
-
-        scale_x = pixmap.width() / self.image.shape[1]
-        scale_y = pixmap.height() / self.image.shape[0]
-
-        # 绘制所有标注框，使用各自标签的颜色
-        for i, annot in enumerate(self.annotations):
-            x1, y1, x2, y2 = annot["box"]
-            x1_scaled = x1 * scale_x + pixmap_x
-            y1_scaled = y1 * scale_y + pixmap_y
-            x2_scaled = x2 * scale_x + pixmap_x
-            y2_scaled = y2 * scale_y + pixmap_y
-
-            # 获取该标签的颜色
-            r, g, b = self.get_class_color(annot["class"])
-            # 选中的框使用稍微亮一点的颜色
-            if i == self.current_box_idx:
-                r = min(255, int(r * 1.2))
-                g = min(255, int(g * 1.2))
-                b = min(255, int(b * 1.2))
-
-            color = QColor(r, g, b)
-            pen = QPen(color, 2)
-            painter.setPen(pen)
-            painter.drawRect(QRect(int(x1_scaled), int(y1_scaled),
-                                   int(x2_scaled - x1_scaled), int(y2_scaled - y1_scaled)))
-
-            # 绘制类别标签，背景使用标签颜色
-            font = QFont()
-            font.setBold(True)
-            font.setPointSize(10)
-            painter.setFont(font)
-            painter.fillRect(int(x1_scaled), int(y1_scaled) - 20,
-                             len(annot["class"]) * 12, 20, color)
-            # 根据背景亮度自动选择文字颜色
-            luminance = (r * 0.299 + g * 0.587 + b * 0.114)
-            text_color = QColor(0, 0, 0) if luminance > 127 else QColor(255, 255, 255)
-            painter.setPen(text_color)
-            painter.drawText(int(x1_scaled), int(y1_scaled) - 5,
-                             f"{annot['class']} ({annot['confidence']:.2f})")
-
-        # 如果有选中的框，绘制控制点
-        if 0 <= self.current_box_idx < len(self.annotations):
-            annot = self.annotations[self.current_box_idx]
-            x1, y1, x2, y2 = annot["box"]
-            x1_scaled = x1 * scale_x + pixmap_x
-            y1_scaled = y1 * scale_y + pixmap_y
-            x2_scaled = x2 * scale_x + pixmap_x
-            y2_scaled = y2 * scale_y + pixmap_y
-
-            # 绘制四个角的控制点，使用黄色
-            control_size = 8
-            points = [
-                (x1_scaled, y1_scaled),  # top-left
-                (x2_scaled, y1_scaled),  # top-right
-                (x1_scaled, y2_scaled),  # bottom-left
-                (x2_scaled, y2_scaled)  # bottom-right
-            ]
-
-            painter.setPen(QPen(QColor(255, 255, 0), 2))
-            painter.setBrush(QColor(255, 255, 0))
-            for (x, y) in points:
-                painter.drawEllipse(int(x - control_size / 2), int(y - control_size / 2),
-                                    control_size, control_size)
-
-    def mousePressEvent(self, event):
-        """鼠标按下事件，用于选择和拖动标注框"""
-        if self.q_image is None or not self.annotations:
-            return super().mousePressEvent(event)
-
-        pos = event.pos()
-        pixmap = self.pixmap()
-        if pixmap.isNull():
-            return None
-
-        # 计算图片在 QLabel 中的偏移量（居中显示时的偏移）
-        pixmap_x = (self.width() - pixmap.width()) // 2
-        pixmap_y = (self.height() - pixmap.height()) // 2
-
-        # 计算缩放比例
-        scale_x = pixmap.width() / self.image.shape[1]
-        scale_y = pixmap.height() / self.image.shape[0]
-        inv_scale_x = 1 / scale_x
-        inv_scale_y = 1 / scale_y
-
-        # 检查是否点击了某个标注框
-        self.current_box_idx = -1
-        self.drag_handle = None
-
-        for i, annot in enumerate(self.annotations):
-            x1, y1, x2, y2 = annot["box"]
-            x1_scaled = x1 * scale_x + pixmap_x
-            y1_scaled = y1 * scale_y + pixmap_y
-            x2_scaled = x2 * scale_x + pixmap_x
-            y2_scaled = y2 * scale_y + pixmap_y
-
-            # 检查是否点击了控制点
-            control_size = 10
-            handles = [
-                (x1_scaled, y1_scaled, 'top_left'),
-                (x2_scaled, y1_scaled, 'top_right'),
-                (x1_scaled, y2_scaled, 'bottom_left'),
-                (x2_scaled, y2_scaled, 'bottom_right')
-            ]
-
-            for (hx, hy, handle) in handles:
-                if (abs(pos.x() - hx) <= control_size and
-                        abs(pos.y() - hy) <= control_size):
-                    self.current_box_idx = i
-                    self.drag_handle = handle
-                    self.last_pos = pos
-                    self.dragging = True
-                    self.update()
-                    return None
-
-            # 检查是否点击了框内部
-            if (x1_scaled <= pos.x() <= x2_scaled and
-                    y1_scaled <= pos.y() <= y2_scaled):
-                self.current_box_idx = i
-                self.drag_handle = 'center'
-                self.last_pos = pos
-                self.box_offset = QPoint(
-                    int(pos.x() - x1_scaled),
-                    int(pos.y() - y1_scaled)
-                )
-                self.dragging = True
-                self.update()
-                return None
-
-        super().mousePressEvent(event)
-        return None
-
-    def mouseMoveEvent(self, event):
-        """鼠标移动事件，用于拖动标注框"""
-        if not self.dragging or self.current_box_idx < 0 or self.current_box_idx >= len(self.annotations):
-            return super().mouseMoveEvent(event)
-
-        pos = event.pos()
-        pixmap = self.pixmap()
-        if pixmap.isNull():
-            return None
-
-        # 计算图片在 QLabel 中的偏移量（居中显示时的偏移）
-        pixmap_x = (self.width() - pixmap.width()) // 2
-        pixmap_y = (self.height() - pixmap.height()) // 2
-
-        # 计算缩放比例
-        scale_x = pixmap.width() / self.image.shape[1]
-        scale_y = pixmap.height() / self.image.shape[0]
-        inv_scale_x = 1 / scale_x
-        inv_scale_y = 1 / scale_y
-
-        annot = self.annotations[self.current_box_idx]
-        x1, y1, x2, y2 = annot["box"]
-        new_x1, new_y1, new_x2, new_y2 = (x1, y1, x2, y2)  # 默认保持原值
-        if self.drag_handle == 'center':
-            # 整体移动
-            dx = (pos.x() - self.last_pos.x()) * inv_scale_x
-            dy = (pos.y() - self.last_pos.y()) * inv_scale_y
-
-            new_x1 = x1 + dx
-            new_y1 = y1 + dy
-            new_x2 = x2 + dx
-            new_y2 = y2 + dy
-
-        elif self.drag_handle == 'top_left':
-            # 左上角
-            new_x1 = (pos.x() - pixmap_x) * inv_scale_x
-            new_y1 = (pos.y() - pixmap_y) * inv_scale_y
-            new_x2 = x2
-            new_y2 = y2
-
-        elif self.drag_handle == 'top_right':
-            # 右上角
-            new_x1 = x1
-            new_y1 = (pos.y() - pixmap_y) * inv_scale_y
-            new_x2 = (pos.x() - pixmap_x) * inv_scale_x
-            new_y2 = y2
-
-        elif self.drag_handle == 'bottom_left':
-            # 左下角
-            new_x1 = (pos.x() - pixmap_x) * inv_scale_x
-            new_y1 = y1
-            new_x2 = x2
-            new_y2 = (pos.y() - pixmap_y) * inv_scale_y
-
-        elif self.drag_handle == 'bottom_right':
-            # 右下角
-            new_x1 = x1
-            new_y1 = y1
-            new_x2 = (pos.x() - pixmap_x) * inv_scale_x
-            new_y2 = (pos.y() - pixmap_y) * inv_scale_y
-
-        # 确保坐标有效且在图像范围内
-        img_width = self.image.shape[1]
-        img_height = self.image.shape[0]
-        
-        # 保证坐标在有效范围内
-        new_x1 = max(0, min(new_x1, img_width))
-        new_y1 = max(0, min(new_y1, img_height))
-        new_x2 = max(0, min(new_x2, img_width))
-        new_y2 = max(0, min(new_y2, img_height))
-        
-        # 保证左上角坐标小于右下角坐标
-        if new_x1 > new_x2:
-            new_x1, new_x2 = new_x2, new_x1
-        if new_y1 > new_y2:
-            new_y1, new_y2 = new_y2, new_y1
-            
-        # 避免框的宽高为0
-        if new_x1 == new_x2:
-            if new_x1 > 0:
-                new_x1 -= 1
-            else:
-                new_x2 += 1
-        if new_y1 == new_y2:
-            if new_y1 > 0:
-                new_y1 -= 1
-            else:
-                new_y2 += 1
-
-        # 更新标注框
-        self.annotations[self.current_box_idx]["box"] = (new_x1, new_y1, new_x2, new_y2)
-        self.last_pos = pos
-        self.update()
-        self.annotation_updated.emit(self.annotations)
-        return None
-
-    def mouseReleaseEvent(self, event):
-        """鼠标释放事件"""
-        self.dragging = False
-        super().mouseReleaseEvent(event)
-
-    def resizeEvent(self, event):
-        """窗口大小改变事件"""
-        if self.q_image:
-            # 修正Qt.KeepAspectRatio和Qt.SmoothTransformation的引用
-            self.setPixmap(QPixmap.fromImage(self.q_image).scaled(
-                self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        super().resizeEvent(event)
-        # 触发重绘以确保标注框正确显示
-        self.update()
-
-    def contextMenuEvent(self, event):
-        """右键菜单事件，用于删除标注框或修改标签"""
-        if self.current_box_idx < 0 or self.current_box_idx >= len(self.annotations):
-            return super().contextMenuEvent(event)
-
-        # 创建上下文菜单
-        menu = QMenu(self)
-
-        # 修改标签动作
-        modify_action = menu.addAction("修改标签")
-        # 删除标注动作
-        delete_action = menu.addAction("删除此标注")
-
-        # 执行选中的动作
-        action = menu.exec(self.mapToGlobal(event.pos()))
-        if action == modify_action:
-            self.modify_annotation_label()
-        elif action == delete_action:
-            self.delete_annotation()
-        return None
-
-    def modify_annotation_label(self):
-        """修改标注标签"""
-        if not self.class_names:
-            QMessageBox.warning(self, "警告", "没有可用的标签，请先在项目设置中添加标签")
-            return
-
-        current_label = self.annotations[self.current_box_idx]["class"]
-        # 从项目标签列表中选择
-        label, ok = QInputDialog.getItem(
-            self, "修改标签", "请选择标签:",
-            self.class_names, self.class_names.index(current_label) if current_label in self.class_names else 0,
-            False)
-
-        if ok and label:
-            self.annotations[self.current_box_idx]["class"] = label
-            # 更新类别ID
-            if label in self.class_names:
-                self.annotations[self.current_box_idx]["class_id"] = self.class_names.index(label)
-            self.update()
-            self.annotation_updated.emit(self.annotations)
-
-    def delete_annotation(self):
-        """删除标注"""
-        del self.annotations[self.current_box_idx]
-        self.current_box_idx = -1
-        self.update()
-        self.annotation_updated.emit(self.annotations)
 
 
 class YOLOAnnotationTool(QMainWindow):
@@ -616,45 +29,16 @@ class YOLOAnnotationTool(QMainWindow):
         self.current_project = None
         self.current_image_idx = -1
         self.current_process_idx = -1
-
-        # UI组件
-        self.project_info_group = None
-        self.project_info_layout = None
-        self.project_name_label = None
-        self.project_path_label = None
-        self.class_count_label = None
-
-        self.config_group = None
-        self.config_layout = None
-        self.image_dir_label = None
-        self.select_image_dir_btn = None
-        self.model_path_label = None
-        self.select_model_btn = None
-        self.output_dir_label = None
-        self.select_output_dir_btn = None
-        self.review_checkbox = None
-        self.manage_classes_btn = None
-        self.process_btn = None
-        self.progress_bar = None
-        self.complete_btn = None
-
-        self.splitter = None
-        self.image_list = None
-        self.image_editor = None
-
-        self.btn_layout = None
-        self.prev_btn = None
-        self.next_btn = None
-        self.export_all_btn = None
-
         self.model = None
-
-        self.init_ui()
-
-    def init_ui(self):
-        """初始化UI界面"""
+        
+        # 初始化UI界面
         self.setWindowTitle("YOLO自动标注工具 - 无项目")
         self.setGeometry(100, 100, 1200, 800)
+
+        # 设置窗口图标
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # 创建菜单栏
         self.create_menu_bar()
@@ -706,12 +90,6 @@ class YOLOAnnotationTool(QMainWindow):
         self.config_layout.addRow("输出目录:", self.output_dir_label)
         self.config_layout.addRow(self.select_output_dir_btn)
 
-        # 人工复判选项
-        self.review_checkbox = QCheckBox("需要人工复判")
-        self.review_checkbox.setChecked(True)
-        self.review_checkbox.clicked.connect(self.on_review_toggled)
-        self.config_layout.addRow(self.review_checkbox)
-
         # 标签管理按钮
         self.manage_classes_btn = QPushButton("管理标签")
         self.manage_classes_btn.clicked.connect(self.manage_classes)
@@ -733,10 +111,10 @@ class YOLOAnnotationTool(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.config_layout.addRow("进度:", self.progress_bar)
-        
-        # 添加已标注数量/总数量的标签
-        self.progress_label = QLabel("0/0")
-        self.config_layout.addRow("", self.progress_label)
+
+        # 添加统计信息标签
+        self.stats_label = QLabel("图片总数量：0 已标注数量：0 当前图片索引：0/0")
+        self.config_layout.addRow("", self.stats_label)
 
         self.config_group.setLayout(self.config_layout)
         main_layout.addWidget(self.config_group)
@@ -750,6 +128,30 @@ class YOLOAnnotationTool(QMainWindow):
         self.image_list.itemDoubleClicked.connect(self.on_image_double_clicked)
         self.splitter.addWidget(self.image_list)
 
+        # 添加筛选按钮
+        self.filter_layout = QHBoxLayout()
+        self.show_all_btn = QPushButton("全部图片")
+        self.show_labeled_btn = QPushButton("已标注")
+        self.show_unlabeled_btn = QPushButton("未标注")
+
+        self.show_all_btn.clicked.connect(self.show_all_images)
+        self.show_labeled_btn.clicked.connect(self.show_labeled_images)
+        self.show_unlabeled_btn.clicked.connect(self.show_unlabeled_images)
+
+        self.show_all_btn.setCheckable(True)
+        self.show_labeled_btn.setCheckable(True)
+        self.show_unlabeled_btn.setCheckable(True)
+
+        # 默认选中全部图片
+        self.show_all_btn.setChecked(True)
+
+        self.filter_layout.addWidget(self.show_all_btn)
+        self.filter_layout.addWidget(self.show_labeled_btn)
+        self.filter_layout.addWidget(self.show_unlabeled_btn)
+
+        # 将筛选按钮添加到主布局中
+        main_layout.addLayout(self.filter_layout)
+
         # 右侧图片编辑区
         self.image_editor = ImageEditor()
         self.image_editor.annotation_updated.connect(self.on_annotation_updated)
@@ -757,6 +159,8 @@ class YOLOAnnotationTool(QMainWindow):
 
         # 底部按钮区域
         self.btn_layout = QHBoxLayout()
+        # 根据用户偏好，将主要操作按钮居中显示
+        self.btn_layout.addStretch()
 
         self.prev_btn = QPushButton("上一张")
         self.prev_btn.clicked.connect(self.prev_image)
@@ -766,7 +170,6 @@ class YOLOAnnotationTool(QMainWindow):
         self.next_btn.clicked.connect(self.next_image)
         self.next_btn.setEnabled(False)
 
-
         self.export_all_btn = QPushButton("导出所有结果")
         self.export_all_btn.clicked.connect(self.export_all_results)
         self.export_all_btn.setEnabled(False)
@@ -774,6 +177,7 @@ class YOLOAnnotationTool(QMainWindow):
         self.btn_layout.addWidget(self.prev_btn)
         self.btn_layout.addWidget(self.next_btn)
         self.btn_layout.addWidget(self.export_all_btn)
+        self.btn_layout.addStretch()
 
         # 添加到主布局
         main_layout.addWidget(self.splitter, 1)
@@ -784,11 +188,57 @@ class YOLOAnnotationTool(QMainWindow):
         # 初始禁用所有按钮，直到创建或打开项目
         self.set_widgets_enabled(False)
 
+        # 筛选状态
+        self.filter_mode = "all"  # "all", "labeled", "unlabeled"
+
+    @property
+    def current_image_path(self):
+        """获取当前选中图片的路径"""
+        if (not self.current_project or
+                self.current_image_idx < 0 or
+                self.current_image_idx >= len(self.current_project.image_paths)):
+            return None
+        return self.current_project.image_paths[self.current_image_idx]
+
+    @property
+    def filter_mode_description(self):
+        """获取当前筛选模式的描述"""
+        if self.filter_mode == "all":
+            return "全部图片"
+        elif self.filter_mode == "labeled":
+            return "已标注"
+        elif self.filter_mode == "unlabeled":
+            return "未标注"
+        return "未知"
+
     def showEvent(self, event):
         """窗口显示事件"""
         super().showEvent(event)
-        # 在窗口显示后设置最大化状态
         self.showMaximized()
+
+    def show_all_images(self):
+        """显示全部图片"""
+        self.filter_mode = "all"
+        self.show_all_btn.setChecked(True)
+        self.show_labeled_btn.setChecked(False)
+        self.show_unlabeled_btn.setChecked(False)
+        self.update_image_list()
+
+    def show_labeled_images(self):
+        """只显示已标注的图片"""
+        self.filter_mode = "labeled"
+        self.show_all_btn.setChecked(False)
+        self.show_labeled_btn.setChecked(True)
+        self.show_unlabeled_btn.setChecked(False)
+        self.update_image_list()
+
+    def show_unlabeled_images(self):
+        """只显示未标注的图片"""
+        self.filter_mode = "unlabeled"
+        self.show_all_btn.setChecked(False)
+        self.show_labeled_btn.setChecked(False)
+        self.show_unlabeled_btn.setChecked(True)
+        self.update_image_list()
 
     def keyPressEvent(self, event):
         """键盘事件处理"""
@@ -882,16 +332,14 @@ class YOLOAnnotationTool(QMainWindow):
         self.select_image_dir_btn.setEnabled(enabled)
         self.select_model_btn.setEnabled(enabled)
         self.select_output_dir_btn.setEnabled(enabled)
-        self.review_checkbox.setEnabled(enabled)
         self.manage_classes_btn.setEnabled(enabled)
-        self.process_btn.setEnabled(enabled and self.check_process_ready())
+        self.process_btn.setEnabled(enabled and self.is_process_ready)
         self.export_all_btn.setEnabled((enabled and self.current_project.output_dir != "" and
                                         len(self.current_project.processed_images.keys()) > 0) if self.current_project is not None else False)
         self.prev_btn.setEnabled(enabled and self.current_image_idx > 0)
         self.next_btn.setEnabled(enabled and self.current_project and
                                  self.current_image_idx < len(self.current_project.image_paths) - 1)
-        self.complete_btn.setEnabled((enabled and self.current_image_idx >= 0
-                                      and self.current_project.review_required) if self.current_project is not None else False)
+        self.complete_btn.setEnabled(enabled and self.current_image_idx >= 0)
 
     def new_project(self):
         """创建新项目"""
@@ -920,12 +368,11 @@ class YOLOAnnotationTool(QMainWindow):
         if not ok:
             return  # 用户取消创建项目
 
-        class_names = []
         if class_input:
             # 分割并处理每个标签（去空格、过滤空字符串）
             class_names = [cls.strip() for cls in class_input.split(',') if cls.strip()]
         else:
-            class_input = default_classes.split(",")
+            class_names = default_classes.split(",")
 
         # 获取项目保存路径
         project_path, _ = QFileDialog.getSaveFileName(
@@ -949,7 +396,13 @@ class YOLOAnnotationTool(QMainWindow):
             self.current_project.class_colors
         )
         self.set_widgets_enabled(True)
-        
+
+        # 重置筛选按钮状态
+        self.filter_mode = "all"
+        self.show_all_btn.setChecked(True)
+        self.show_labeled_btn.setChecked(False)
+        self.show_unlabeled_btn.setChecked(False)
+
         # 更新进度条和进度标签
         self.update_progress_on_open()
 
@@ -985,14 +438,19 @@ class YOLOAnnotationTool(QMainWindow):
                 self.current_project.class_names,
                 self.current_project.class_colors
             )
-            self.review_checkbox.setChecked(self.current_project.review_required)
             self.set_widgets_enabled(True)
+
+            # 重置筛选按钮状态
+            self.filter_mode = "all"
+            self.show_all_btn.setChecked(True)
+            self.show_labeled_btn.setChecked(False)
+            self.show_unlabeled_btn.setChecked(False)
 
             # 更新配置显示
             self.image_dir_label.setText(self.current_project.image_dir)
             self.model_path_label.setText(self.current_project.model_path)
             self.output_dir_label.setText(self.current_project.output_dir)
-            
+
             # 更新进度条和进度标签
             self.update_progress_on_open()
 
@@ -1076,15 +534,25 @@ class YOLOAnnotationTool(QMainWindow):
             self.image_dir_label.setText(dir_path)
 
             # 获取目录中的图片文件
-            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif']
+            image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
             self.current_project.image_paths = []
-            for file in os.listdir(dir_path):
-                ext = os.path.splitext(file)[1].lower()
-                if ext in image_extensions:
-                    self.current_project.image_paths.append(os.path.join(dir_path, file))
+
+            # 使用列表推导式提高性能
+            try:
+                files = os.listdir(dir_path)
+                # 使用集合查找提高性能
+                image_files = [
+                    os.path.join(dir_path, file) for file in files
+                    if os.path.splitext(file)[1].lower() in image_extensions
+                ]
+                self.current_project.image_paths = image_files
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"读取目录失败: {str(e)}")
+                return
 
             # 更新图片列表
             self.update_image_list()
+
             self.check_process_ready()
             self.save_project()  # 自动保存项目
 
@@ -1100,21 +568,46 @@ class YOLOAnnotationTool(QMainWindow):
         if current_item:
             current_selected = current_item.data(Qt.ItemDataRole.UserRole)
 
-        # 只在图片数量发生变化时才重新构建整个列表
-        if self.image_list.count() != len(self.current_project.image_paths):
-            self.image_list.clear()
+        # 根据筛选模式过滤图片
+        filtered_paths = []
+        if self.filter_mode == "all":
+            filtered_paths = self.current_project.image_paths
+        elif self.filter_mode == "labeled":
+            # 只显示已标注的图片
+            processed_images_set = set(self.current_project.processed_images.keys())
             for path in self.current_project.image_paths:
+                if path in processed_images_set and self.current_project.has_annotations(path):
+                    filtered_paths.append(path)
+        elif self.filter_mode == "unlabeled":
+            # 只显示未标注的图片
+            processed_images_set = set(self.current_project.processed_images.keys())
+            for path in self.current_project.image_paths:
+                if not (path in processed_images_set and self.current_project.has_annotations(path)):
+                    filtered_paths.append(path)
+
+        # 只在图片数量发生变化时才重新构建整个列表
+        if self.image_list.count() != len(filtered_paths):
+            self.image_list.clear()
+            for path in filtered_paths:
                 item = QListWidgetItem(os.path.basename(path))
                 # 修正Qt.UserRole的引用
                 item.setData(Qt.ItemDataRole.UserRole, path)
                 self.image_list.addItem(item)
-        
-        # 更新所有项目的颜色状态（只更新状态，不重建列表）
+
+        # 批量更新所有项目的颜色状态（只更新状态，不重建列表）
+        # 使用更高效的批量更新方式
+        processed_images_set = set(self.current_project.processed_images.keys())
         for i in range(self.image_list.count()):
             item = self.image_list.item(i)
             image_path = item.data(Qt.ItemDataRole.UserRole)
-            self.update_list_item_status(item, image_path)
-        
+            # 重置颜色
+            item.setForeground(QColor(0, 0, 0))  # 默认黑色
+
+            # 标记有标注信息的图片为绿色
+            if image_path in processed_images_set and self.current_project.has_annotations(image_path):
+                # 有标注信息 - 绿色
+                item.setForeground(QColor(0, 128, 0))
+
         # 恢复选中状态
         if current_selected:
             for i in range(self.image_list.count()):
@@ -1122,36 +615,31 @@ class YOLOAnnotationTool(QMainWindow):
                 if item.data(Qt.ItemDataRole.UserRole) == current_selected:
                     self.image_list.setCurrentItem(item)
                     break
-        
+        elif self.image_list.count() > 0 and self.current_image_idx >= 0:
+            # 如果当前图片在筛选结果中，确保它被选中
+            current_image_path = self.current_project.image_paths[self.current_image_idx]
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == current_image_path:
+                    self.image_list.setCurrentItem(item)
+                    break
+
         # 更新进度标签
         self.update_progress_label()
-
-    def update_list_item_status(self, item, image_path):
-        """更新单个列表项的状态显示"""
-        # 重置颜色
-        item.setForeground(QColor(0, 0, 0))  # 默认黑色
-        
-        # 标记已处理和已审查的图片
-        if image_path in self.current_project.process_status:
-            status = self.current_project.process_status[image_path]
-            if status == "processed":
-                item.setForeground(QColor(0, 128, 0))  # 已处理 - 绿色
-            elif status == "reviewed":
-                item.setForeground(QColor(0, 0, 128))  # 已审查 - 蓝色
-            # 添加"正在处理"状态的显示
-            elif status == "processing":
-                item.setForeground(QColor(255, 165, 0))  # 正在处理 - 橙色
 
     def update_progress_label(self):
         """更新进度标签显示"""
         if not self.current_project or not self.current_project.image_paths:
-            self.progress_label.setText("0/0")
+            self.stats_label.setText("图片总数量：0 已标注数量：0 当前图片索引：0/0")
             return
-            
-        total = self.current_project.get_total_count()
-        processed = self.current_project.get_processed_count()
-        reviewed = self.current_project.get_reviewed_count()
-        self.progress_label.setText(f"{processed}/{total} (已审查: {reviewed})")
+
+        total = self.current_project.total_count
+        processed = self.current_project.processed_count
+        current_index = self.current_image_idx + 1 if self.current_image_idx >= 0 else 0
+        self.stats_label.setText(f"图片总数量：{total} 已标注数量：{processed} 当前图片索引：{current_index}/{total}")
+        # 立即处理事件队列，确保UI及时更新
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
 
     def select_model_file(self):
         """选择模型文件"""
@@ -1186,25 +674,29 @@ class YOLOAnnotationTool(QMainWindow):
                                          self.current_project.review_required)
             self.save_project()  # 自动保存项目
 
-    def check_process_ready(self):
+    @property
+    def is_process_ready(self):
         """检查是否可以开始处理"""
         if not self.current_project:
             return False
 
-        ready = (bool(self.current_project.image_dir) and
-                 bool(self.current_project.model_path) and
-                 len(self.current_project.image_paths) > 0)
+        return self.current_project.is_ready
+
+    def check_process_ready(self):
+        """检查是否可以开始处理"""
+        ready = self.is_process_ready
         self.process_btn.setEnabled(ready)
         return ready
 
     def start_processing(self):
         """开始处理图片（从当前位置开始）"""
-        if not self.current_project or not self.check_process_ready():
+        if not self.current_project or not self.is_process_ready:
             return
 
         self.set_widgets_enabled(False)
         self.current_process_idx = self.current_project.last_processed_index
-        self.process_next_image()  # 开始处理第一张
+        # 使用 QTimer.singleShot 避免递归调用导致的栈溢出
+        QTimer.singleShot(1, self.process_next_image)  # 开始处理第一张
 
     def process_next_image(self):
         """处理下一张图片"""
@@ -1215,10 +707,11 @@ class YOLOAnnotationTool(QMainWindow):
 
         # 更新进度条
         total = len(self.current_project.image_paths)
+        # 实时更新进度条
         progress = int((self.current_process_idx / total) * 100)
         self.progress_bar.setValue(progress)
-        
-        # 更新进度标签
+
+        # 实时更新进度标签
         self.update_progress_label()
 
         # 获取当前要处理的图片路径
@@ -1227,8 +720,8 @@ class YOLOAnnotationTool(QMainWindow):
         # 如果已处理过则跳过
         if current_image_path in self.current_project.processed_images:
             self.current_process_idx += 1
-            # 允许UI更新后再继续处理下一张
-            QTimer.singleShot(10, self.process_next_image)
+            # 使用单次定时器而不是递归调用，避免栈溢出
+            QTimer.singleShot(1, self.process_next_image)
             return
 
         try:
@@ -1240,7 +733,7 @@ class YOLOAnnotationTool(QMainWindow):
             print(f"图片 {current_image_path} 处理错误: {error_msg}")
             QMessageBox.warning(self, "处理错误", f"处理 {os.path.basename(current_image_path)} 时出错:\n{error_msg}")
             self.current_process_idx += 1
-            QTimer.singleShot(10, self.process_next_image)
+            QTimer.singleShot(1, self.process_next_image)
 
     def process_single_image(self, image_path):
         """处理单张图片的核心逻辑"""
@@ -1258,12 +751,15 @@ class YOLOAnnotationTool(QMainWindow):
             raise Exception("无法读取图片文件")
 
         try:
-            results = self.model(image)
+            # 使用更小的批次大小和禁用详细输出来优化内存使用
+            results = self.model(image, verbose=False, batch=1)
         except Exception as e:
             raise Exception(f"模型推理失败: {str(e)}")
-            
-        torch.cuda.empty_cache()
+
         annotations = []
+
+        # 创建类名字典以提高查找性能
+        class_names_set = set(self.current_project.class_names)
 
         for result in results:
             boxes = result.boxes.cpu().numpy()
@@ -1273,7 +769,8 @@ class YOLOAnnotationTool(QMainWindow):
                 conf = box.conf[0]
                 cls = int(box.cls[0])
                 class_name = model_names[cls]
-                if class_name in self.current_project.class_names:
+                # 使用集合查找提高性能
+                if class_name in class_names_set:
                     annotations.append({
                         "box": (int(x1), int(y1), int(x2), int(y2)),
                         "confidence": float(conf),
@@ -1281,37 +778,78 @@ class YOLOAnnotationTool(QMainWindow):
                         "class": class_name
                     })
 
+        # 释放CUDA内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return image, annotations
+
+    def update_single_item_in_list(self, image_path):
+        """更新列表中单个图片项的状态，支持筛选模式"""
+        # 检查当前筛选模式是否应该显示此图片
+        should_show = True
+        processed_images_set = set(self.current_project.processed_images.keys())
+
+        if self.filter_mode == "labeled":
+            # 只显示已标注的图片
+            should_show = image_path in processed_images_set and self.current_project.has_annotations(image_path)
+        elif self.filter_mode == "unlabeled":
+            # 只显示未标注的图片
+            should_show = not (image_path in processed_images_set and self.current_project.has_annotations(image_path))
+
+        # 查找现有项
+        item_index = -1
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path == image_path:
+                item_index = i
+                break
+
+        # 如果应该显示但未找到，添加到列表
+        if should_show and item_index == -1:
+            item = QListWidgetItem(os.path.basename(image_path))
+            item.setData(Qt.ItemDataRole.UserRole, image_path)
+            self.image_list.addItem(item)
+            item_index = self.image_list.count() - 1
+
+        # 如果不应该显示但找到了，从列表中移除
+        elif not should_show and item_index != -1:
+            self.image_list.takeItem(item_index)
+            return
+
+        # 如果应该显示且找到了，更新状态
+        if should_show and item_index != -1:
+            item = self.image_list.item(item_index)
+            # 重置颜色
+            item.setForeground(QColor(0, 0, 0))  # 默认黑色
+
+            # 标记有标注信息的图片为绿色
+            if image_path in processed_images_set and self.current_project.has_annotations(image_path):
+                # 有标注信息 - 绿色
+                item.setForeground(QColor(0, 128, 0))
 
     def on_single_image_processed(self, image_path, image, annotations):
         """单张图片处理完成回调"""
         # 更新项目状态
         self.current_project.processed_images[image_path] = (image, annotations)
-        self.current_project.process_status[image_path] = "processed"
         self.current_project.last_processed_index = self.current_process_idx
-        
+
         # 更新单个列表项状态
-        for i in range(self.image_list.count()):
-            item = self.image_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == image_path:
-                self.update_list_item_status(item, image_path)
-                break
+        self.update_single_item_in_list(image_path)
 
         # 更新进度标签
         self.update_progress_label()
 
-        # 显示当前处理的图片（如果需要人工复判）
-        if self.current_project.review_required:
-            self.current_image_idx = self.current_process_idx
-            self.show_current_image()
-            self.set_widgets_enabled(True)
-            self.complete_btn.setEnabled(True)
-            return  # 等待人工操作后再继续
+        # 显示当前处理的图片
+        self.current_image_idx = self.current_process_idx
+        self.show_current_image()
+        self.set_widgets_enabled(True)
+        self.complete_btn.setEnabled(True)
 
-        # 不需要复判则直接处理下一张
+        # 继续处理下一张，使用定时器避免递归调用导致的栈溢出
         self.current_process_idx += 1
-        # 使用QTimer让UI有时间更新
-        QTimer.singleShot(10, self.process_next_image)
+        QTimer.singleShot(1, self.process_next_image)
 
     def on_process_error(self, image_path, error_msg):
         """处理错误回调"""
@@ -1336,7 +874,6 @@ class YOLOAnnotationTool(QMainWindow):
             return
 
         self.current_project.processed_images[image_path] = (None, annotations)
-        self.current_project.process_status[image_path] = "processed"
 
         # 更新图片列表状态
         self.update_image_list()
@@ -1346,13 +883,11 @@ class YOLOAnnotationTool(QMainWindow):
             self.current_image_idx = self.current_project.image_paths.index(image_path)
             self.current_project.last_processed_index = self.current_image_idx
 
-            # 如果需要人工复判，显示当前图片并暂停处理
-            if self.current_project.review_required:
-                # 显示当前图片
-                self.show_current_image()
-                self.update_nav_buttons()
-                self.set_widgets_enabled(True)
-                self.complete_btn.setEnabled(True)
+            # 显示当前图片
+            self.show_current_image()
+            self.update_nav_buttons()
+            self.set_widgets_enabled(True)
+            self.complete_btn.setEnabled(True)
 
     def on_processing_finished(self):
         """所有图片处理完成后的回调"""
@@ -1363,12 +898,7 @@ class YOLOAnnotationTool(QMainWindow):
         self.set_widgets_enabled(True)
         self.save_project()  # 保存处理结果
 
-        # 如果不需要人工复判，自动导出结果
-        if (not self.current_project.review_required and
-                self.current_project.output_dir):
-            self.export_all_results()
-            QMessageBox.information(self, "完成", "所有图片处理完成并已导出结果")
-        elif len(self.current_project.processed_images) > 0:
+        if len(self.current_project.processed_images) > 0:
             QMessageBox.information(self, "完成", "所有图片处理完成")
             # 如果还没有显示任何图片，显示第一张
             if self.current_image_idx == -1 and len(self.current_project.image_paths) > 0:
@@ -1384,6 +914,26 @@ class YOLOAnnotationTool(QMainWindow):
             return
 
         image_path = self.current_project.image_paths[self.current_image_idx]
+
+        # 如果当前图片没有标注信息，则自动进行推理处理
+        if not self.current_project.has_annotations(image_path):
+            try:
+                # 进行推理处理
+                image, annotations = self.process_single_image(image_path)
+                # 更新项目状态
+                self.current_project.processed_images[image_path] = (image, annotations)
+
+                # 更新列表项状态
+                self.update_single_item_in_list(image_path)
+            except Exception as e:
+                error_msg = f"处理失败: {str(e)}"
+                print(f"图片 {image_path} 处理错误: {error_msg}")
+                QMessageBox.warning(self, "处理错误", f"处理 {os.path.basename(image_path)} 时出错:\n{error_msg}")
+                self.image_editor.set_image(None)
+                self.image_editor.set_annotations([])
+                return
+
+        # 显示图片和标注
         if image_path in self.current_project.processed_images:
             image, annotations = self.current_project.processed_images[image_path]
 
@@ -1410,10 +960,14 @@ class YOLOAnnotationTool(QMainWindow):
                     self.image_list.setCurrentItem(item)
                     break
             self.image_editor.update()
+
         else:
             # 图像不在processed_images中
             self.image_editor.set_image(None)
             self.image_editor.set_annotations([])
+
+        # 更新当前图片索引显示
+        self.update_progress_label()
 
     def on_image_double_clicked(self, item):
         """双击图片列表项"""
@@ -1422,15 +976,6 @@ class YOLOAnnotationTool(QMainWindow):
 
         image_path = item.data(Qt.ItemDataRole.UserRole)
         if image_path in self.current_project.image_paths:
-            # 标记当前图片为已审查（如果需要）
-            if (self.current_project.review_required and 
-                0 <= self.current_image_idx < len(self.current_project.image_paths)):
-                current_image_path = self.current_project.image_paths[self.current_image_idx]
-                if current_image_path in self.current_project.process_status:
-                    self.current_project.process_status[current_image_path] = "reviewed"
-                    self.update_list_item_status(item, current_image_path)
-                    self.update_progress_label()
-                
             self.current_image_idx = self.current_project.image_paths.index(image_path)
             self.show_current_image()
             self.update_nav_buttons()
@@ -1440,44 +985,12 @@ class YOLOAnnotationTool(QMainWindow):
         if (self.current_project and
                 self.current_image_idx < len(self.current_project.image_paths) - 1):
             self.current_image_idx += 1
-
-            # 标记当前图片为已审查（点击下一张按钮意味着当前图片已完成审查）
-            # 注意：这里应该标记的是前一张图片（即当前索引-1）
-            if self.current_image_idx > 0:
-                previous_image_path = self.current_project.image_paths[self.current_image_idx - 1]
-                self.current_project.process_status[previous_image_path] = "reviewed"
-                # 更新单个列表项状态
-                for i in range(self.image_list.count()):
-                    item = self.image_list.item(i)
-                    if item.data(Qt.ItemDataRole.UserRole) == previous_image_path:
-                        self.update_list_item_status(item, previous_image_path)
-                        break
-                self.update_progress_label()
-
-            # 如果下一张未处理且需要自动处理，启动处理
-            image_path = self.current_project.image_paths[self.current_image_idx]
-            if (self.current_project.review_required and
-                    image_path not in self.current_project.process_status):
-                self.start_processing()
-            else:
-                self.show_current_image()
-                self.update_nav_buttons()
+            self.show_current_image()
+            self.update_nav_buttons()
 
     def prev_image(self):
         """显示上一张图片"""
         if self.current_project and self.current_image_idx > 0:
-            # 标记当前图片为已审查（如果需要）
-            if self.current_project.review_required:
-                current_image_path = self.current_project.image_paths[self.current_image_idx]
-                self.current_project.process_status[current_image_path] = "reviewed"
-                # 更新单个列表项状态
-                for i in range(self.image_list.count()):
-                    item = self.image_list.item(i)
-                    if item.data(Qt.ItemDataRole.UserRole) == current_image_path:
-                        self.update_list_item_status(item, current_image_path)
-                        break
-                self.update_progress_label()
-            
             self.current_image_idx -= 1
             self.show_current_image()
             self.update_nav_buttons()
@@ -1489,7 +1002,7 @@ class YOLOAnnotationTool(QMainWindow):
 
         self.prev_btn.setEnabled(self.current_image_idx > 0)
         self.next_btn.setEnabled(self.current_image_idx < len(self.current_project.image_paths) - 1)
-        self.complete_btn.setEnabled(self.current_project.review_required)
+        self.complete_btn.setEnabled(True)
 
     def complete_annotation(self):
         """完成当前图片标注，进入下一张"""
@@ -1498,41 +1011,11 @@ class YOLOAnnotationTool(QMainWindow):
                 self.current_image_idx >= len(self.current_project.image_paths)):
             return
 
-        # 标记为已审查
-        image_path = self.current_project.image_paths[self.current_image_idx]
-        self.current_project.process_status[image_path] = "reviewed"
-        # 更新单个列表项状态
-        for i in range(self.image_list.count()):
-            item = self.image_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == image_path:
-                self.update_list_item_status(item, image_path)
-                break
-
-        # 更新进度标签
-        self.update_progress_label()
-
-        # 移动到下一张（与next_image方法保持一致）
+        # 移动到下一张
         if self.current_image_idx < len(self.current_project.image_paths) - 1:
             self.current_image_idx += 1
-            
-            # 标记前一张图片为已审查（与next_image方法保持一致）
-            self.current_project.process_status[image_path] = "reviewed"
-            # 更新单个列表项状态
-            for i in range(self.image_list.count()):
-                item = self.image_list.item(i)
-                if item.data(Qt.ItemDataRole.UserRole) == image_path:
-                    self.update_list_item_status(item, image_path)
-                    break
-            self.update_progress_label()
-
-            # 如果下一张未处理且需要自动处理，启动处理
-            next_image_path = self.current_project.image_paths[self.current_image_idx]
-            if (self.current_project.review_required and
-                    next_image_path not in self.current_project.process_status):
-                self.start_processing()
-            else:
-                self.show_current_image()
-                self.update_nav_buttons()
+            self.show_current_image()
+            self.update_nav_buttons()
         else:
             QMessageBox.information(self, "完成", "所有图片已处理完毕")
             self.update_nav_buttons()
@@ -1548,7 +1031,11 @@ class YOLOAnnotationTool(QMainWindow):
         if image_path in self.current_project.processed_images:
             image, _ = self.current_project.processed_images[image_path]
             self.current_project.processed_images[image_path] = (image, annotations)
-            self.save_project()  # 自动保存修改
+            # 更新列表项状态
+            self.update_single_item_in_list(image_path)
+            # 只在非拖拽操作时保存项目
+            if not self.image_editor.during_drag_operation:
+                self.save_project()  # 自动保存修改
 
     def export_all_results(self):
         """导出所有结果"""
@@ -1576,22 +1063,14 @@ class YOLOAnnotationTool(QMainWindow):
         test_img_dir = os.path.join(base_dir, "test", "images")
         test_label_dir = os.path.join(base_dir, "test", "labels")
 
-        # 创建所有必要目录
-        for dir_path in [
-            unlabeled_dir,
-            train_img_dir, train_label_dir,
-            val_img_dir, val_label_dir,
-            test_img_dir, test_label_dir
-        ]:
-            os.makedirs(dir_path, exist_ok=True)
+        # 目录已预先创建，此处不再需要
 
         # 分离有标注和无标注图片
         labeled_images = []
         unlabeled_images = []
         for image_path in self.current_project.image_paths:
             # 检查是否有标注信息且标注不为空
-            if (image_path in self.current_project.processed_images and
-                    self.current_project.processed_images[image_path][1]):  # [1]是标注数据
+            if self.current_project.has_annotations(image_path):
                 labeled_images.append(image_path)
             else:
                 unlabeled_images.append(image_path)
@@ -1608,6 +1087,19 @@ class YOLOAnnotationTool(QMainWindow):
         train_images = labeled_images[:train_count]
         val_images = labeled_images[train_count:train_count + val_count]
         test_images = labeled_images[train_count + val_count:]
+
+        # 预先创建需要的目录以提高性能
+        dirs_to_create = [
+            unlabeled_dir,
+            train_img_dir, train_label_dir,
+            val_img_dir, val_label_dir,
+            test_img_dir, test_label_dir
+        ]
+        for dir_path in dirs_to_create:
+            os.makedirs(dir_path, exist_ok=True)
+
+        # 预先创建类别名称到ID的映射以提高查找性能
+        class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
 
         # 导出已标注图片及对应的标注文件
         datasets = [
@@ -1629,6 +1121,7 @@ class YOLOAnnotationTool(QMainWindow):
                 self.export_annotation_file(image_path, label_dir)
 
                 current += 1
+                # 实时更新进度条
                 self.progress_bar.setValue(int(current / total * 100))
 
         # 导出未标注图片
@@ -1636,6 +1129,7 @@ class YOLOAnnotationTool(QMainWindow):
             img_filename = os.path.basename(image_path)
             shutil.copy2(image_path, os.path.join(unlabeled_dir, img_filename))
             current += 1
+            # 实时更新进度条
             self.progress_bar.setValue(int(current / total * 100))
 
         QMessageBox.information(None, "完成",
@@ -1675,6 +1169,9 @@ class YOLOAnnotationTool(QMainWindow):
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         output_txt_path = os.path.join(label_dir, f"{base_name}.txt")
 
+        # 创建类别名称到ID的映射以提高查找性能
+        class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
+
         # 写入YOLO格式标注
         with open(output_txt_path, "w", encoding="utf-8") as f:
             for annot in annotations:
@@ -1686,11 +1183,13 @@ class YOLOAnnotationTool(QMainWindow):
                 h = (y2 - y1) / height
 
                 # 获取类别ID
-                class_id = 0
-                if annot["class"] in self.current_project.class_names:
-                    class_id = self.current_project.class_names.index(annot["class"])
+                class_id = class_name_to_id.get(annot["class"], 0)
 
                 f.write(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+
+            # 强制刷新文件缓冲区确保数据写入
+            f.flush()
+            os.fsync(f.fileno())
 
     def show_about(self):
         """显示关于对话框"""
@@ -1717,14 +1216,15 @@ class YOLOAnnotationTool(QMainWindow):
         """在打开项目时更新进度条和进度标签"""
         if not self.current_project:
             return
-            
+
         # 更新进度条
-        total = len(self.current_project.image_paths)
-        if total > 0:
-            progress = int((self.current_project.last_processed_index / total) * 100)
-            self.progress_bar.setValue(progress)
-        else:
-            self.progress_bar.setValue(0)
-            
+        self.progress_bar.setValue(self.current_project.progress)
+
         # 更新进度标签
         self.update_progress_label()
+
+        # 重置筛选按钮状态
+        self.filter_mode = "all"
+        self.show_all_btn.setChecked(True)
+        self.show_labeled_btn.setChecked(False)
+        self.show_unlabeled_btn.setChecked(False)

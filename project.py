@@ -22,13 +22,26 @@ class Project:
         self.class_colors = generate_distinct_colors(len(self.class_names))
 
         # 处理配置
-        self.review_required = True
         self.last_processed_index = 0  # 上次处理的图片索引，用于恢复
 
         # 标注数据缓存
         self.image_paths = []  # 图片路径列表
         self.processed_images = {}  # 存储处理过的图片 {路径: (原图, 标注)}
-        self.process_status = {}  # 处理状态 {路径: "pending"|"processed"|"reviewed"}
+
+    @property
+    def has_image_dir(self):
+        """检查是否设置了图片目录"""
+        return bool(self.image_dir)
+
+    @property
+    def has_model_path(self):
+        """检查是否设置了模型路径"""
+        return bool(self.model_path)
+
+    @property
+    def has_output_dir(self):
+        """检查是否设置了输出目录"""
+        return bool(self.output_dir)
 
     def save(self, path=None):
         """保存项目到文件，缓存标注信息"""
@@ -61,10 +74,8 @@ class Project:
             "output_dir": self.output_dir,
             "class_names": self.class_names,
             "class_colors": self.class_colors,
-            "review_required": self.review_required,
             "last_processed_index": self.last_processed_index,
             "image_paths": self.image_paths,
-            "process_status": self.process_status,
             # 只保存标注信息，不保存图像数据
             "annotations": convert_numpy_types({
                 path: anns for path, (img, anns) in self.processed_images.items()
@@ -92,10 +103,8 @@ class Project:
             self.output_dir = data.get("output_dir", "")
             self.class_names = data.get("class_names", [])
             self.class_colors = data.get("class_colors", generate_distinct_colors(len(self.class_names)))
-            self.review_required = data.get("review_required", True)
             self.last_processed_index = data.get("last_processed_index", 0)
             self.image_paths = data.get("image_paths", [])
-            self.process_status = data.get("process_status", {})
 
             # 确保颜色数量与标签数量一致
             if len(self.class_colors) != len(self.class_names):
@@ -114,18 +123,48 @@ class Project:
             print(f"加载项目失败: {e}")
             return False
 
-    def get_processed_count(self):
-        """获取已处理（processed或reviewed）的图片数量"""
-        return len([path for path in self.image_paths 
-                   if path in self.process_status and 
-                   self.process_status[path] in ["processed", "reviewed"]])
+    @property
+    def processed_count(self):
+        """获取已处理（有标注信息）的图片数量"""
+        # 使用集合提高查找性能
+        image_paths_set = set(self.image_paths)
+        count = 0
+        # 只检查当前项目中的图片路径
+        for path in self.processed_images:
+            if path in image_paths_set and self.has_annotations(path):
+                count += 1
+        return count
 
-    def get_total_count(self):
+    @property
+    def remaining_count(self):
+        """获取剩余未处理的图片数量"""
+        return self.total_count - self.last_processed_index
+
+    @property
+    def total_count(self):
         """获取图片总数"""
         return len(self.image_paths)
-        
-    def get_reviewed_count(self):
-        """获取已审查的图片数量"""
-        return len([path for path in self.image_paths 
-                   if path in self.process_status and 
-                   self.process_status[path] == "reviewed"])
+
+    @property
+    def is_ready(self):
+        """检查项目是否已准备好进行处理"""
+        return self.has_image_dir and self.has_model_path and self.total_count > 0
+
+    @property
+    def progress(self):
+        """获取处理进度 (0-100)"""
+        if self.total_count == 0:
+            return 0
+        return int((self.last_processed_index / self.total_count) * 100)
+
+    def has_annotations(self, image_path):
+        """检查图片是否有标注信息"""
+        if image_path in self.processed_images:
+            _, annotations = self.processed_images[image_path]
+            # 添加类型检查，确保annotations不是None
+            return annotations is not None and len(annotations) > 0
+        return False
+
+    def get_image_name(self, image_path):
+        """获取图片文件名"""
+        return os.path.basename(image_path)
