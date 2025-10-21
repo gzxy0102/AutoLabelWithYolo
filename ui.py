@@ -1,8 +1,11 @@
+import logging
 import os
 import random
 import shutil
+from typing import Optional, List, Dict, Any
 
 import cv2
+import numpy as np
 import torch
 from PySide6.QtCore import (Qt, QTimer)
 from PySide6.QtGui import (QColor, QAction, QIcon)
@@ -18,6 +21,12 @@ from image_editor import ImageEditor
 from project import Project
 from utils import generate_distinct_colors
 
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# 应用程序版本信息
+APP_VERSION = "1.0.0"
+
 
 class YOLOAnnotationTool(QMainWindow):
     """带项目管理、彩色标签的YOLO自动标注工具主窗口"""
@@ -26,11 +35,13 @@ class YOLOAnnotationTool(QMainWindow):
         super().__init__()
 
         # 在__init__中定义所有实例属性
-        self.current_project = None
-        self.current_image_idx = -1
-        self.current_process_idx = -1
-        self.model = None
-        
+        self.current_project: Optional[Project] = None
+        self.current_image_idx: int = -1
+        self.current_process_idx: int = -1
+        self.model: Optional[Any] = None
+        self.filter_mode: str = "all"  # "all", "labeled", "unlabeled"
+        logger.info("初始化YOLO自动标注工具窗口")
+
         # 初始化UI界面
         self.setWindowTitle("YOLO自动标注工具 - 无项目")
         self.setGeometry(100, 100, 1200, 800)
@@ -556,11 +567,18 @@ class YOLOAnnotationTool(QMainWindow):
             self.check_process_ready()
             self.save_project()  # 自动保存项目
 
-    def update_image_list(self):
-        """更新图片列表"""
+    def update_image_list(self) -> None:
+        """更新图片列表，根据筛选模式显示并更新图片状态
+        
+        根据当前的filter_mode（全部、已标注或未标注）过滤图片列表，并更新每个图片项的状态
+        包括颜色标记和选中状态。
+        """
         if not self.current_project:
             self.image_list.clear()
+            logger.debug("当前无项目，清空图片列表")
             return
+
+        logger.debug(f"更新图片列表，筛选模式: {self.filter_mode_description}")
 
         # 获取当前选中项，以便更新后保持选中状态
         current_selected = None
@@ -568,52 +586,55 @@ class YOLOAnnotationTool(QMainWindow):
         if current_item:
             current_selected = current_item.data(Qt.ItemDataRole.UserRole)
 
+        # 预先构建已处理图片的集合和标注状态字典，避免重复查询
+        processed_images_set = set(self.current_project.processed_images.keys())
+        # 使用缓存的_labeled_images集合优化查询性能
+        labeled_images_set = getattr(self.current_project, '_labeled_images', set())
+
         # 根据筛选模式过滤图片
-        filtered_paths = []
+        filtered_paths: List[str] = []
         if self.filter_mode == "all":
             filtered_paths = self.current_project.image_paths
         elif self.filter_mode == "labeled":
             # 只显示已标注的图片
-            processed_images_set = set(self.current_project.processed_images.keys())
-            for path in self.current_project.image_paths:
-                if path in processed_images_set and self.current_project.has_annotations(path):
-                    filtered_paths.append(path)
+            filtered_paths = [path for path in self.current_project.image_paths
+                              if path in labeled_images_set]
         elif self.filter_mode == "unlabeled":
             # 只显示未标注的图片
-            processed_images_set = set(self.current_project.processed_images.keys())
-            for path in self.current_project.image_paths:
-                if not (path in processed_images_set and self.current_project.has_annotations(path)):
-                    filtered_paths.append(path)
+            filtered_paths = [path for path in self.current_project.image_paths
+                              if path not in labeled_images_set]
 
         # 只在图片数量发生变化时才重新构建整个列表
         if self.image_list.count() != len(filtered_paths):
+            logger.debug(f"图片数量变化，重新构建列表: {len(filtered_paths)} 张图片")
             self.image_list.clear()
             for path in filtered_paths:
                 item = QListWidgetItem(os.path.basename(path))
-                # 修正Qt.UserRole的引用
                 item.setData(Qt.ItemDataRole.UserRole, path)
+                # 设置工具提示，显示完整路径
+                item.setToolTip(path)
                 self.image_list.addItem(item)
 
         # 批量更新所有项目的颜色状态（只更新状态，不重建列表）
-        # 使用更高效的批量更新方式
-        processed_images_set = set(self.current_project.processed_images.keys())
         for i in range(self.image_list.count()):
             item = self.image_list.item(i)
             image_path = item.data(Qt.ItemDataRole.UserRole)
-            # 重置颜色
-            item.setForeground(QColor(0, 0, 0))  # 默认黑色
-
-            # 标记有标注信息的图片为绿色
-            if image_path in processed_images_set and self.current_project.has_annotations(image_path):
-                # 有标注信息 - 绿色
+            # 标记有标注信息的图片为绿色，使用集合查询提高性能
+            if image_path in labeled_images_set:
                 item.setForeground(QColor(0, 128, 0))
+                item.setText(f"{os.path.basename(image_path)}")
+            else:
+                item.setForeground(QColor(0, 0, 0))  # 默认黑色
+                item.setText(os.path.basename(image_path))
 
-        # 恢复选中状态
+        # 优化选中状态恢复逻辑
         if current_selected:
+            # 优先尝试恢复之前选中的图片
             for i in range(self.image_list.count()):
                 item = self.image_list.item(i)
                 if item.data(Qt.ItemDataRole.UserRole) == current_selected:
                     self.image_list.setCurrentItem(item)
+                    logger.debug(f"恢复选中的图片: {os.path.basename(current_selected)}")
                     break
         elif self.image_list.count() > 0 and self.current_image_idx >= 0:
             # 如果当前图片在筛选结果中，确保它被选中
@@ -622,6 +643,7 @@ class YOLOAnnotationTool(QMainWindow):
                 item = self.image_list.item(i)
                 if item.data(Qt.ItemDataRole.UserRole) == current_image_path:
                     self.image_list.setCurrentItem(item)
+                    logger.debug(f"选中当前图片索引: {self.current_image_idx}")
                     break
 
         # 更新进度标签
@@ -641,30 +663,63 @@ class YOLOAnnotationTool(QMainWindow):
         from PySide6.QtCore import QCoreApplication
         QCoreApplication.processEvents()
 
-    def select_model_file(self):
-        """选择模型文件"""
+    def select_model_file(self) -> None:
+        """选择并设置YOLO模型文件路径
+        
+        打开文件对话框让用户选择.pt格式的YOLO模型文件，更新项目设置并保存。
+        """
         if not self.current_project:
+            logger.warning("未创建或加载项目，无法选择模型文件")
+            QMessageBox.warning(self, "警告", "请先创建或加载项目")
             return
 
+        logger.info("打开模型文件选择对话框")
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择模型文件", "", "YOLO模型文件 (*.pt);;所有文件 (*)")
-        if file_path:
-            self.current_project.model_path = file_path
-            self.model_path_label.setText(file_path)
-            self.check_process_ready()
-            self.save_project()  # 自动保存项目
 
-    def select_output_dir(self):
-        """选择输出目录"""
+        if file_path:
+            try:
+                # 验证文件是否存在
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"模型文件不存在: {file_path}")
+
+                self.current_project.model_path = file_path
+                self.model_path_label.setText(file_path)
+                self.check_process_ready()
+                self.save_project()  # 自动保存项目
+                logger.info(f"成功设置模型文件: {os.path.basename(file_path)}")
+            except Exception as e:
+                logger.error(f"设置模型文件时出错: {str(e)}")
+                QMessageBox.critical(self, "错误", f"设置模型文件失败: {str(e)}")
+
+    def select_output_dir(self) -> None:
+        """选择并设置标注输出目录
+        
+        打开目录选择对话框让用户选择保存标注结果的目录，更新项目设置并保存。
+        """
         if not self.current_project:
+            logger.warning("未创建或加载项目，无法选择输出目录")
+            QMessageBox.warning(self, "警告", "请先创建或加载项目")
             return
 
+        logger.info("打开输出目录选择对话框")
         dir_path = QFileDialog.getExistingDirectory(self, "选择输出目录")
+
         if dir_path:
-            self.current_project.output_dir = dir_path
-            self.output_dir_label.setText(dir_path)
-            self.export_all_btn.setEnabled(len(self.current_project.processed_images) > 0)
-            self.save_project()  # 自动保存项目
+            try:
+                # 验证目录是否存在
+                if not os.path.exists(dir_path):
+                    raise FileNotFoundError(f"输出目录不存在: {dir_path}")
+
+                self.current_project.output_dir = dir_path
+                self.output_dir_label.setText(dir_path)
+                has_processed = len(self.current_project.processed_images) > 0
+                self.export_all_btn.setEnabled(has_processed)
+                self.save_project()  # 自动保存项目
+                logger.info(f"成功设置输出目录: {dir_path}")
+            except Exception as e:
+                logger.error(f"设置输出目录时出错: {str(e)}")
+                QMessageBox.critical(self, "错误", f"设置输出目录失败: {str(e)}")
 
     @property
     def is_process_ready(self):
@@ -690,27 +745,41 @@ class YOLOAnnotationTool(QMainWindow):
         # 使用 QTimer.singleShot 避免递归调用导致的栈溢出
         QTimer.singleShot(1, self.process_next_image)  # 开始处理第一张
 
-    def process_next_image(self):
-        """处理下一张图片"""
-        # 检查是否所有图片都已处理
+    def process_next_image(self) -> None:
+        """处理下一张图片，实现批处理的核心逻辑
+        
+        检查处理进度，更新UI状态，处理单张图片，并在完成或出错时继续下一张。
+        使用QTimer避免递归调用导致的栈溢出问题。
+        """
+        # 检查是否所有图片都已处理完成
         if self.current_process_idx >= len(self.current_project.image_paths):
+            logger.info("所有图片处理完成，调用完成回调")
             self.on_processing_finished()
             return
 
         # 更新进度条
         total = len(self.current_project.image_paths)
+        current = self.current_process_idx + 1
         # 实时更新进度条
         progress = int((self.current_process_idx / total) * 100)
         self.progress_bar.setValue(progress)
+
+        # 添加进度信息到状态栏
+        status_text = f"正在处理 {current}/{total} ({progress}%)"
+        self.statusBar().showMessage(status_text)
 
         # 实时更新进度标签
         self.update_progress_label()
 
         # 获取当前要处理的图片路径
         current_image_path = self.current_project.image_paths[self.current_process_idx]
+        current_image_name = os.path.basename(current_image_path)
+
+        logger.info(f"处理图片 {current}/{total}: {current_image_name}")
 
         # 如果已处理过则跳过
         if current_image_path in self.current_project.processed_images:
+            logger.debug(f"图片已处理，跳过: {current_image_name}")
             self.current_process_idx += 1
             # 使用单次定时器而不是递归调用，避免栈溢出
             QTimer.singleShot(1, self.process_next_image)
@@ -719,61 +788,107 @@ class YOLOAnnotationTool(QMainWindow):
         try:
             # 直接在主线程处理图片
             image, annotations = self.process_single_image(current_image_path)
-            self.on_single_image_processed(current_image_path, image, annotations)
+
+            # 仅当成功处理且有有效标注时才调用回调
+            if image is not None:
+                logger.debug(f"成功处理图片，准备回调: {current_image_name}")
+                self.on_single_image_processed(current_image_path, image, annotations)
+            else:
+                logger.error(f"图片处理返回空结果: {current_image_name}")
+                raise Exception("图片处理返回空结果")
+
         except Exception as e:
             error_msg = f"处理失败: {str(e)}"
-            print(f"图片 {current_image_path} 处理错误: {error_msg}")
-            QMessageBox.warning(self, "处理错误", f"处理 {os.path.basename(current_image_path)} 时出错:\n{error_msg}")
+            logger.error(f"图片 {current_image_path} 处理错误: {error_msg}")
+
+            # 避免频繁弹窗，只在处理少量图片或重要错误时显示
+            if self.current_process_idx < 10 or (self.current_process_idx % 50 == 0):
+                QMessageBox.warning(self, "处理错误", f"处理 {current_image_name} 时出错:\n{error_msg}")
+
+            # 记录错误到错误日志
+            if hasattr(self, 'error_log'):
+                self.error_log.append((current_image_path, str(e)))
+
+            # 继续处理下一张图片
             self.current_process_idx += 1
             QTimer.singleShot(1, self.process_next_image)
 
-    def process_single_image(self, image_path):
-        """处理单张图片的核心逻辑"""
+    def process_single_image(self, image_path: str) -> tuple[np.ndarray, List[Dict[str, Any]]]:
+        """处理单张图片的核心逻辑
+        
+        Args:
+            image_path: 图片文件路径
+            
+        Returns:
+            tuple: (处理后的图片数组, 标注列表)
+            
+        Raises:
+            Exception: 模型加载或推理失败时抛出
+        """
         # 初始化模型（确保只初始化一次）
         if not hasattr(self, 'model') or self.model is None:
             try:
+                logger.info(f"加载YOLO模型: {self.current_project.model_path}")
                 self.model = YOLO(self.current_project.model_path)
-                self.model.to(device="cuda" if torch.cuda.is_available() else "cpu")
+                # 设置设备优先级: CUDA > MPS > CPU
+                device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+                self.model.to(device=device)
+                logger.info(f"模型加载成功，使用设备: {device}")
             except Exception as e:
+                logger.error(f"模型加载失败: {str(e)}")
                 raise Exception(f"模型加载失败: {str(e)}")
 
         # 处理图片
+        logger.debug(f"读取图片: {image_path}")
         image = cv2.imread(image_path)
         if image is None:
-            raise Exception("无法读取图片文件")
+            logger.error(f"无法读取图片文件: {image_path}")
+            raise Exception(f"无法读取图片文件: {os.path.basename(image_path)}")
 
         try:
-            # 使用更小的批次大小和禁用详细输出来优化内存使用
-            results = self.model(image, verbose=False, batch=1)
+            # 使用优化的模型推理参数
+            logger.debug(f"执行模型推理: {os.path.basename(image_path)}")
+            results = self.model(image, verbose=False, batch=1, device="cuda" if torch.cuda.is_available() else "cpu")
+            logger.debug(f"模型推理完成，检测到 {sum(len(result.boxes) for result in results)} 个对象")
         except Exception as e:
+            logger.error(f"模型推理失败: {str(e)}")
             raise Exception(f"模型推理失败: {str(e)}")
 
-        annotations = []
-
+        annotations: List[Dict[str, Any]] = []
         # 创建类名字典以提高查找性能
         class_names_set = set(self.current_project.class_names)
+        # 添加置信度阈值配置
+        confidence_threshold = getattr(self.current_project, 'confidence_threshold', 0.25)
 
         for result in results:
-            boxes = result.boxes.cpu().numpy()
-            model_names = result.names
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                conf = box.conf[0]
-                cls = int(box.cls[0])
-                class_name = model_names[cls]
-                # 使用集合查找提高性能
-                if class_name in class_names_set:
-                    annotations.append({
-                        "box": (int(x1), int(y1), int(x2), int(y2)),
-                        "confidence": float(conf),
-                        "class_id": int(cls),
-                        "class": class_name
-                    })
+            boxes = result.boxes
+            if len(boxes) > 0:
+                boxes_np = boxes.cpu().numpy()
+                model_names = result.names
+                for box in boxes_np:
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    conf = box.conf[0]
+                    # 根据置信度阈值过滤低置信度检测
+                    if conf < confidence_threshold:
+                        continue
+
+                    cls = int(box.cls[0])
+                    class_name = model_names[cls]
+                    # 使用集合查找提高性能
+                    if class_name in class_names_set:
+                        annotations.append({
+                            "box": (int(x1), int(y1), int(x2), int(y2)),
+                            "confidence": float(conf),
+                            "class_id": int(cls),
+                            "class": class_name
+                        })
 
         # 释放CUDA内存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            logger.debug("CUDA缓存已清理")
 
+        logger.info(f"图片处理完成: {os.path.basename(image_path)}, 检测到 {len(annotations)} 个有效标注")
         return image, annotations
 
     def update_single_item_in_list(self, image_path):
@@ -821,27 +936,58 @@ class YOLOAnnotationTool(QMainWindow):
                 # 有标注信息 - 绿色
                 item.setForeground(QColor(0, 128, 0))
 
-    def on_single_image_processed(self, image_path, image, annotations):
-        """单张图片处理完成回调"""
-        # 更新项目状态
-        self.current_project.processed_images[image_path] = (image, annotations)
-        self.current_project.last_processed_index = self.current_process_idx
+    def on_single_image_processed(self, image_path: str, image: np.ndarray, annotations: List[Dict[str, Any]]) -> None:
+        """单张图片处理完成回调
+        
+        Args:
+            image_path: 图片文件路径
+            image: 处理后的图片数组
+            annotations: 检测到的标注列表
+        """
+        try:
+            # 更新项目状态
+            self.current_project.processed_images[image_path] = (image, annotations)
+            self.current_project.last_processed_index = self.current_process_idx
 
-        # 更新单个列表项状态
-        self.update_single_item_in_list(image_path)
+            # 更新已标注图片缓存集合，优化后续查询性能
+            if not hasattr(self.current_project, '_labeled_images'):
+                self.current_project._labeled_images = set()
+            self.current_project._labeled_images.add(image_path)
 
-        # 更新进度标签
-        self.update_progress_label()
+            logger.debug(f"更新项目状态: {os.path.basename(image_path)}, 标注数量: {len(annotations)}")
 
-        # 显示当前处理的图片
-        self.current_image_idx = self.current_process_idx
-        self.show_current_image()
-        self.set_widgets_enabled(True)
-        self.complete_btn.setEnabled(True)
+            # 更新单个列表项状态
+            self.update_single_item_in_list(image_path)
 
-        # 继续处理下一张，使用定时器避免递归调用导致的栈溢出
-        self.current_process_idx += 1
-        QTimer.singleShot(1, self.process_next_image)
+            # 更新进度标签
+            self.update_progress_label()
+
+            # 显示当前处理的图片
+            self.current_image_idx = self.current_process_idx
+            self.show_current_image()
+
+            # 自动保存项目（每处理10张或最后一张时）
+            total = len(self.current_project.image_paths)
+            if (self.current_process_idx + 1) % 10 == 0 or (self.current_process_idx + 1) == total:
+                self.save_project()
+                logger.info(f"自动保存项目进度: {self.current_process_idx + 1}/{total}")
+
+            # 恢复UI交互
+            self.set_widgets_enabled(True)
+            self.complete_btn.setEnabled(True)
+
+            # 继续处理下一张，使用定时器避免递归调用导致的栈溢出
+            self.current_process_idx += 1
+            QTimer.singleShot(1, self.process_next_image)
+
+        except Exception as e:
+            error_msg = f"处理回调失败: {str(e)}"
+            logger.error(f"图片 {image_path} 处理回调错误: {error_msg}")
+            QMessageBox.critical(self, "处理回调错误", f"处理 {os.path.basename(image_path)} 回调时出错:\n{error_msg}")
+
+            # 确保即使出错也能继续处理
+            self.current_process_idx += 1
+            QTimer.singleShot(1, self.process_next_image)
 
     def on_process_error(self, image_path, error_msg):
         """处理错误回调"""
@@ -1029,159 +1175,313 @@ class YOLOAnnotationTool(QMainWindow):
             if not self.image_editor.during_drag_operation:
                 self.save_project()  # 自动保存修改
 
-    def export_all_results(self):
-        """导出所有结果"""
-        if (not self.current_project or
-                not self.current_project.processed_images or
-                not self.current_project.output_dir):
-            return
-        # 显示比例设置对话框
-        dialog = DatasetSplitDialog()
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        ratios = dialog.get_ratios()
-        if not ratios:
-            return
-        train_ratio, val_ratio, test_ratio = ratios
-        # 创建目录结构
-        unlabeled_dir = os.path.join(self.current_project.output_dir, "unlabeled")
-        # 创建新的目录结构
-        base_dir = os.path.join(self.current_project.output_dir, "labeled")
-        # 有标注数据的目录结构 (images存放图片, labels存放标注文件)
-        train_img_dir = os.path.join(base_dir, "train", "images")
-        train_label_dir = os.path.join(base_dir, "train", "labels")
-        val_img_dir = os.path.join(base_dir, "val", "images")
-        val_label_dir = os.path.join(base_dir, "val", "labels")
-        test_img_dir = os.path.join(base_dir, "test", "images")
-        test_label_dir = os.path.join(base_dir, "test", "labels")
+    def export_all_results(self) -> None:
+        """导出所有结果到YOLO格式数据集目录结构
+        
+        显示数据集划分对话框，根据用户设置的比例将数据分为训练集、验证集和测试集，
+        并导出为标准YOLO格式（images和labels目录结构）。
+        """
+        try:
+            if not self.current_project:
+                logger.warning("无当前项目，无法导出结果")
+                QMessageBox.warning(self, "警告", "请先创建或加载项目")
+                return
 
-        # 目录已预先创建，此处不再需要
+            if not self.current_project.processed_images:
+                logger.warning("没有已处理的图片，无法导出结果")
+                QMessageBox.warning(self, "警告", "没有已处理的图片")
+                return
 
-        # 分离有标注和无标注图片
-        labeled_images = []
-        unlabeled_images = []
-        for image_path in self.current_project.image_paths:
-            # 检查是否有标注信息且标注不为空
-            if self.current_project.has_annotations(image_path):
-                labeled_images.append(image_path)
-            else:
-                unlabeled_images.append(image_path)
+            if not self.current_project.output_dir:
+                logger.warning("未设置输出目录，无法导出结果")
+                QMessageBox.warning(self, "警告", "请先设置输出目录")
+                return
 
-        # 随机打乱已标注图片顺序
-        random.shuffle(labeled_images)
-        total_labeled = len(labeled_images)
+            logger.info("开始导出所有结果")
 
-        # 计算各数据集数量
-        train_count = int(total_labeled * train_ratio)
-        val_count = int(total_labeled * val_ratio)
+            # 显示比例设置对话框
+            dialog = DatasetSplitDialog()
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                logger.info("用户取消了数据集划分设置")
+                return
 
-        # 分配图片到各个数据集
-        train_images = labeled_images[:train_count]
-        val_images = labeled_images[train_count:train_count + val_count]
-        test_images = labeled_images[train_count + val_count:]
+            ratios = dialog.get_ratios()
+            if not ratios:
+                logger.warning("未获取到有效的数据集划分比例")
+                return
 
-        # 预先创建需要的目录以提高性能
-        dirs_to_create = [
-            unlabeled_dir,
-            train_img_dir, train_label_dir,
-            val_img_dir, val_label_dir,
-            test_img_dir, test_label_dir
-        ]
-        for dir_path in dirs_to_create:
-            os.makedirs(dir_path, exist_ok=True)
+            train_ratio, val_ratio, test_ratio = ratios
+            logger.info(f"数据集划分比例 - 训练: {train_ratio}, 验证: {val_ratio}, 测试: {test_ratio}")
 
-        # 预先创建类别名称到ID的映射以提高查找性能
-        class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
+            # 创建目录结构
+            unlabeled_dir = os.path.join(self.current_project.output_dir, "unlabeled")
+            base_dir = os.path.join(self.current_project.output_dir, "labeled")
 
-        # 导出已标注图片及对应的标注文件
-        datasets = [
-            (train_images, train_img_dir, train_label_dir),
-            (val_images, val_img_dir, val_label_dir),
-            (test_images, test_img_dir, test_label_dir)
-        ]
+            # 有标注数据的目录结构 (images存放图片, labels存放标注文件)
+            train_img_dir = os.path.join(base_dir, "train", "images")
+            train_label_dir = os.path.join(base_dir, "train", "labels")
+            val_img_dir = os.path.join(base_dir, "val", "images")
+            val_label_dir = os.path.join(base_dir, "val", "labels")
+            test_img_dir = os.path.join(base_dir, "test", "images")
+            test_label_dir = os.path.join(base_dir, "test", "labels")
 
-        total = len(labeled_images) + len(unlabeled_images)
-        current = 0
+            # 使用utils.ensure_directory确保目录存在，提高安全性
+            from utils import ensure_directory
+            dirs_to_create = [
+                unlabeled_dir,
+                train_img_dir, train_label_dir,
+                val_img_dir, val_label_dir,
+                test_img_dir, test_label_dir
+            ]
 
-        for images, img_dir, label_dir in datasets:
-            for image_path in images:
-                # 复制原始图片到对应images目录
+            for dir_path in dirs_to_create:
+                ensure_directory(dir_path)
+                logger.debug(f"确保目录存在: {dir_path}")
+
+            # 分离有标注和无标注图片
+            labeled_images: List[str] = []
+            unlabeled_images: List[str] = []
+
+            for image_path in self.current_project.image_paths:
+                # 检查是否有标注信息且标注不为空
+                if self.current_project.has_annotations(image_path):
+                    labeled_images.append(image_path)
+                else:
+                    unlabeled_images.append(image_path)
+
+            logger.info(f"找到 {len(labeled_images)} 张有标注图片，{len(unlabeled_images)} 张无标注图片")
+
+            # 随机打乱已标注图片顺序
+            random.shuffle(labeled_images)
+            total_labeled = len(labeled_images)
+
+            # 计算各数据集数量
+            train_count = int(total_labeled * train_ratio)
+            val_count = int(total_labeled * val_ratio)
+
+            # 分配图片到各个数据集
+            train_images = labeled_images[:train_count]
+            val_images = labeled_images[train_count:train_count + val_count]
+            test_images = labeled_images[train_count + val_count:]
+
+            logger.info(
+                f"数据集划分完成 - 训练集: {len(train_images)}, 验证集: {len(val_images)}, 测试集: {len(test_images)}")
+
+            # 导出已标注图片及对应的标注文件
+            datasets = [
+                (train_images, train_img_dir, train_label_dir),
+                (val_images, val_img_dir, val_label_dir),
+                (test_images, test_img_dir, test_label_dir)
+            ]
+
+            total = len(labeled_images) + len(unlabeled_images)
+            current = 0
+
+            for images, img_dir, label_dir in datasets:
+                for image_path in images:
+                    # 复制原始图片到对应images目录
+                    img_filename = os.path.basename(image_path)
+                    shutil.copy2(image_path, os.path.join(img_dir, img_filename))
+
+                    # 生成并保存标注文件到对应labels目录
+                    self.export_annotation_file(image_path, label_dir)
+
+                    current += 1
+                    # 实时更新进度条
+                    self.progress_bar.setValue(int(current / total * 100))
+
+            # 导出未标注图片
+            for image_path in unlabeled_images:
                 img_filename = os.path.basename(image_path)
-                shutil.copy2(image_path, os.path.join(img_dir, img_filename))
-
-                # 生成并保存标注文件到对应labels目录
-                self.export_annotation_file(image_path, label_dir)
-
+                shutil.copy2(image_path, os.path.join(unlabeled_dir, img_filename))
                 current += 1
                 # 实时更新进度条
                 self.progress_bar.setValue(int(current / total * 100))
 
-        # 导出未标注图片
-        for image_path in unlabeled_images:
-            img_filename = os.path.basename(image_path)
-            shutil.copy2(image_path, os.path.join(unlabeled_dir, img_filename))
-            current += 1
-            # 实时更新进度条
-            self.progress_bar.setValue(int(current / total * 100))
+            # 预先创建类别名称到ID的映射以提高查找性能
+            class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
 
-        QMessageBox.information(None, "完成",
-                                f"所有图片已导出到 {base_dir}\n"
-                                f"已标注: {len(labeled_images)} 张 (训练集: {len(train_images)}, "
-                                f"验证集: {len(val_images)}, 测试集: {len(test_images)})\n"
-                                f"未标注: {len(unlabeled_images)} 张")
-        self.progress_bar.setValue(0)
+            # 添加导出训练集配置文件
+            self._export_dataset_config(base_dir, class_name_to_id)
 
-    def export_annotation_file(self, image_path, label_dir):
-        """仅导出YOLO格式的标注文件（不生成带框图片）"""
-        if (not self.current_project or
-                image_path not in self.current_project.processed_images):
-            return
+            QMessageBox.information(None, "完成",
+                                    f"所有图片已导出到 {base_dir}\n"
+                                    f"已标注: {len(labeled_images)} 张 (训练集: {len(train_images)}, "
+                                    f"验证集: {len(val_images)}, 测试集: {len(test_images)})\n"
+                                    f"未标注: {len(unlabeled_images)} 张")
 
-        # 获取标注信息
-        image, annotations = self.current_project.processed_images[image_path]
-        if annotations is None:
-            return
+        except Exception as e:
+            logger.error(f"导出结果时出错: {str(e)}")
+            QMessageBox.critical(self, "导出错误", f"导出结果失败: {str(e)}")
 
-        # 如果图像为None，尝试加载它
-        if image is None:
-            image = cv2.imread(image_path)
-            # 更新缓存中的图像
+    @staticmethod
+    def _export_dataset_config(base_dir: str, class_name_to_id: Dict[str, int]) -> None:
+        """导出数据集配置文件
+        
+        Args:
+            base_dir: 数据集基础目录
+            class_name_to_id: 类别名称到ID的映射
+        """
+        try:
+            # 导出classes.txt文件
+            classes_file = os.path.join(base_dir, "classes.txt")
+            with open(classes_file, "w", encoding="utf-8") as f:
+                for class_name in sorted(class_name_to_id.keys(), key=lambda x: class_name_to_id[x]):
+                    f.write(f"{class_name}\n")
+            logger.info(f"成功导出类别配置文件: {classes_file}")
+
+            # 导出dataset.yaml配置文件（YOLO格式）
+            yaml_file = os.path.join(base_dir, "dataset.yaml")
+            with open(yaml_file, "w", encoding="utf-8") as f:
+                f.write("train: train/images\n")
+                f.write("val: val/images\n")
+                f.write("test: test/images\n\n")
+                f.write(f"nc: {len(class_name_to_id)}\n")
+                f.write("names: [")
+                f.write(", ".join(
+                    [f'\"{name}\"' for name in sorted(class_name_to_id.keys(), key=lambda x: class_name_to_id[x])]))
+                f.write("]\n")
+            logger.info(f"成功导出YOLO配置文件: {yaml_file}")
+
+        except Exception as e:
+            logger.error(f"导出配置文件时出错: {str(e)}")
+
+    def export_annotation_file(self, image_path: str, label_dir: str) -> bool:
+        """导出单个图片的YOLO格式标注文件
+        
+        Args:
+            image_path: 图像文件路径
+            label_dir: 标注文件保存目录
+            
+        Returns:
+            bool: 导出成功返回True，失败返回False
+        """
+        try:
+            if not self.current_project:
+                logger.error("当前无活动项目")
+                return False
+
+            if image_path not in self.current_project.processed_images:
+                logger.warning(f"图片未处理，跳过导出: {image_path}")
+                return False
+
+            # 获取标注信息
+            image, annotations = self.current_project.processed_images[image_path]
+            if annotations is None:
+                logger.debug(f"图片无标注信息: {image_path}")
+                return False
+
+            if not annotations:
+                logger.debug(f"图片标注为空: {image_path}")
+                # 创建空文件表明已处理但无标注
+                base_name = os.path.splitext(os.path.basename(image_path))[0]
+                output_txt_path = os.path.join(label_dir, f"{base_name}.txt")
+                open(output_txt_path, 'w').close()  # 创建空文件
+                logger.debug(f"创建空标注文件: {output_txt_path}")
+                return True
+
+            # 如果图像为None，尝试加载它
+            if image is None:
+                logger.debug(f"缓存中无图像数据，尝试加载: {image_path}")
+                image = cv2.imread(image_path)
+                # 更新缓存中的图像
+                if image is not None:
+                    self.current_project.processed_images[image_path] = (image, annotations)
+                    logger.debug(f"成功加载并更新图像缓存: {image_path}")
+
+            # 获取图片尺寸用于坐标归一化
             if image is not None:
-                self.current_project.processed_images[image_path] = (image, annotations)
+                height, width = image.shape[:2]
+                logger.debug(f"图像尺寸: {width}x{height}")
+            else:
+                # 如果无法加载图像，给出警告并跳过
+                logger.warning(f"无法加载图像，跳过导出: {image_path}")
+                return False
 
-        # 获取图片尺寸用于坐标归一化
-        if image is not None:
-            height, width = image.shape[:2]
-        else:
-            # 如果无法加载图像，给出警告并跳过
-            print(f"警告：无法加载图像 {image_path}，跳过导出")
-            return
+            # 验证目录存在
+            if not os.path.exists(label_dir):
+                try:
+                    os.makedirs(label_dir, exist_ok=True)
+                    logger.info(f"创建标注目录: {label_dir}")
+                except Exception as e:
+                    logger.error(f"创建标注目录失败: {str(e)}")
+                    return False
 
-        # 生成标注文件名（与图片同名，后缀改为txt）
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        output_txt_path = os.path.join(label_dir, f"{base_name}.txt")
+            # 生成标注文件名
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            output_txt_path = os.path.join(label_dir, f"{base_name}.txt")
 
-        # 创建类别名称到ID的映射以提高查找性能
-        class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
+            # 创建类别名称到ID的映射以提高查找性能
+            class_name_to_id = {name: i for i, name in enumerate(self.current_project.class_names)}
 
-        # 写入YOLO格式标注
-        with open(output_txt_path, "w", encoding="utf-8") as f:
-            for annot in annotations:
-                x1, y1, x2, y2 = annot["box"]
-                # 转换为YOLO格式：中心点坐标和宽高（归一化）
-                cx = (x1 + x2) / 2 / width
-                cy = (y1 + y2) / 2 / height
-                w = (x2 - x1) / width
-                h = (y2 - y1) / height
+            # 写入YOLO格式标注
+            with open(output_txt_path, "w", encoding="utf-8") as f:
+                valid_annotations = 0
+                for annot in annotations:
+                    try:
+                        if "box" not in annot or "class" not in annot:
+                            logger.warning(f"标注数据不完整: {annot}")
+                            continue
 
-                # 获取类别ID
-                class_id = class_name_to_id.get(annot["class"], 0)
+                        x1, y1, x2, y2 = annot["box"]
 
-                f.write(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+                        # 验证坐标有效性
+                        if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+                            logger.warning(f"标注坐标超出图像范围: {image_path}, 坐标: {x1}, {y1}, {x2}, {y2}")
+                            # 裁剪坐标到有效范围
+                            x1 = max(0, x1)
+                            y1 = max(0, y1)
+                            x2 = min(width, x2)
+                            y2 = min(height, y2)
 
-            # 强制刷新文件缓冲区确保数据写入
-            f.flush()
-            os.fsync(f.fileno())
+                        # 检查边界框是否有效
+                        if x2 <= x1 or y2 <= y1:
+                            logger.warning(f"无效边界框(宽或高为0): {image_path}, 坐标: {x1}, {y1}, {x2}, {y2}")
+                            continue
+
+                        # 转换为YOLO格式：中心点坐标和宽高（归一化）
+                        cx = (x1 + x2) / 2 / width
+                        cy = (y1 + y2) / 2 / height
+                        w = (x2 - x1) / width
+                        h = (y2 - y1) / height
+
+                        # 确保坐标在有效范围内
+                        cx = max(0.0, min(1.0, cx))
+                        cy = max(0.0, min(1.0, cy))
+                        w = max(0.0, min(1.0, w))
+                        h = max(0.0, min(1.0, h))
+
+                        # 获取类别ID
+                        class_name = annot["class"]
+                        if class_name not in class_name_to_id:
+                            logger.error(f"未知类别: {class_name}")
+                            continue
+
+                        class_id = class_name_to_id[class_name]
+
+                        f.write(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n")
+                        valid_annotations += 1
+                    except Exception as e:
+                        logger.error(f"处理单个标注时出错: {str(e)}")
+                        continue
+
+                # 强制刷新文件缓冲区确保数据写入
+                f.flush()
+                os.fsync(f.fileno())
+
+            if valid_annotations > 0:
+                logger.info(f"成功导出 {valid_annotations} 个标注到: {output_txt_path}")
+                return True
+            else:
+                # 如果没有有效标注，删除空文件
+                if os.path.exists(output_txt_path):
+                    os.remove(output_txt_path)
+                logger.warning(f"无有效标注导出: {image_path}")
+                return False
+
+        except Exception as e:
+            logger.error(f"导出标注文件时出错: {str(e)}")
+            return False
 
     def show_about(self):
         """显示关于对话框"""

@@ -1,9 +1,16 @@
+import logging
+from typing import List, Dict, Optional, Tuple, Any
+
 import cv2
-from PySide6.QtCore import (Qt, QRect, QPoint, Signal, QTimer)
+from PySide6.QtCore import (Qt, QRect, QPoint, Signal)
 from PySide6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor, QFont)
 from PySide6.QtWidgets import (QLabel, QMessageBox, QMenu, QInputDialog)
 
 from utils import generate_distinct_colors
+
+# 配置日志记录
+logger = logging.getLogger(__name__)
+
 
 
 class ImageEditor(QLabel):
@@ -14,19 +21,22 @@ class ImageEditor(QLabel):
         super().__init__(parent)
 
         # 在__init__中定义所有实例属性
-        self.image = None
-        self.q_image = None
-        self.annotations = []
-        self.class_names = []
-        self.class_colors = []
-        self.current_box_idx = -1
-        self.dragging = False
-        self.drag_handle = None  # None, 'top_left', 'top_right', 'bottom_left', 'bottom_right', 'center'
+        self.image: Optional[Any] = None
+        self.q_image: Optional[QImage] = None
+        self.annotations: List[Dict] = []
+        self.class_names: List[str] = []
+        self.class_colors: List[Tuple[int, int, int]] = []
+        self.current_box_idx: int = -1
+        self.dragging: bool = False
+        self.drag_handle: Optional[str] = None  # None, 'top_left', 'top_right', 'bottom_left', 'bottom_right', 'center'
         self.last_pos = QPoint()
         self.box_offset = QPoint()
         
         # 添加一个标志，表示是否在拖拽过程中
-        self.during_drag_operation = False
+        self.during_drag_operation: bool = False
+        
+        # 缓存颜色字典，提高查找性能
+        self._color_cache: Dict[str, Tuple[int, int, int]] = {}
 
         self.init_ui()
 
@@ -80,7 +90,7 @@ class ImageEditor(QLabel):
         self.current_box_idx = -1
         self.update()
 
-    def set_class_info(self, class_names, class_colors):
+    def set_class_info(self, class_names: List[str], class_colors: List[Tuple[int, int, int]]) -> None:
         """设置标签列表和对应的颜色"""
         self.class_names = class_names.copy()
         # 确保颜色数量与标签数量一致
@@ -88,33 +98,40 @@ class ImageEditor(QLabel):
             self.class_colors = generate_distinct_colors(len(class_names))
         else:
             self.class_colors = class_colors.copy()
+        
+        # 重新构建颜色缓存
+        self._color_cache = dict(zip(self.class_names, self.class_colors))
+        logger.debug(f"已更新标签信息：{len(self.class_names)}个标签")
 
-    @property
-    def class_color_cache(self):
-        """获取类颜色缓存"""
-        return dict(zip(self.class_names, self.class_colors))
+    # 移除不再需要的class_color_cache属性，直接使用_color_cache
 
-    def get_class_color(self, class_name):
+    def get_class_color(self, class_name: str) -> Tuple[int, int, int]:
         """获取标签对应的颜色，如果没有则返回默认颜色"""
         # 首先尝试从缓存中获取
-        if class_name in self.class_color_cache:
-            return self.class_color_cache[class_name]
+        if class_name in self._color_cache:
+            return self._color_cache[class_name]
         
         try:
             idx = self.class_names.index(class_name)
             color = self.class_colors[idx]
+            # 更新缓存
+            self._color_cache[class_name] = color
             return color
         except ValueError:
-            return 0, 255, 0  # 默认绿色
+            # 对于未知标签，使用默认绿色并缓存
+            default_color = (0, 255, 0)
+            self._color_cache[class_name] = default_color
+            return default_color
 
     def paintEvent(self, event):
         """绘制事件，用于显示图片和带颜色的标注框"""
         super().paintEvent(event)
-        if self.q_image is None or not self.annotations:
+        
+        # 添加基本条件检查
+        if self.q_image is None:
             return
-
+            
         painter = QPainter(self)
-        # 修正QPainter.Antialiasing的引用
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # 计算缩放比例
@@ -126,79 +143,113 @@ class ImageEditor(QLabel):
         pixmap_x = (self.width() - pixmap.width()) // 2
         pixmap_y = (self.height() - pixmap.height()) // 2
 
-        scale_x = pixmap.width() / self.image.shape[1]
-        scale_y = pixmap.height() / self.image.shape[0]
+        # 确保self.image存在且有效
+        if self.image is None:
+            return
+            
+        try:
+            scale_x = pixmap.width() / self.image.shape[1]
+            scale_y = pixmap.height() / self.image.shape[0]
+        except (AttributeError, IndexError) as e:
+            logger.error(f"计算缩放比例时出错: {str(e)}")
+            return
 
         # 绘制所有标注框，使用各自标签的颜色
-        # 使用缓存的class_colors字典以提高查找性能
-        for i, annot in enumerate(self.annotations):
-            x1, y1, x2, y2 = annot["box"]
-            x1_scaled = x1 * scale_x + pixmap_x
-            y1_scaled = y1 * scale_y + pixmap_y
-            x2_scaled = x2 * scale_x + pixmap_x
-            y2_scaled = y2 * scale_y + pixmap_y
+        if self.annotations:
+            for i, annot in enumerate(self.annotations):
+                try:
+                    # 检查标注数据的有效性
+                    if not isinstance(annot, dict) or "box" not in annot or "class" not in annot:
+                        logger.warning(f"无效的标注数据: {annot}")
+                        continue
+                        
+                    x1, y1, x2, y2 = annot["box"]
+                    x1_scaled = x1 * scale_x + pixmap_x
+                    y1_scaled = y1 * scale_y + pixmap_y
+                    x2_scaled = x2 * scale_x + pixmap_x
+                    y2_scaled = y2 * scale_y + pixmap_y
 
-            # 获取该标签的颜色
-            class_name = annot["class"]
-            if class_name in self.class_color_cache:
-                r, g, b = self.class_color_cache[class_name]
-            else:
-                r, g, b = self.get_class_color(class_name)
-            
-            # 选中的框使用稍微亮一点的颜色
-            if i == self.current_box_idx:
-                r = min(255, int(r * 1.2))
-                g = min(255, int(g * 1.2))
-                b = min(255, int(b * 1.2))
+                    # 获取该标签的颜色，使用优化的缓存
+                    class_name = annot["class"]
+                    r, g, b = self.get_class_color(class_name)
+                    
+                    # 选中的框使用稍微亮一点的颜色
+                    if i == self.current_box_idx:
+                        r = min(255, int(r * 1.2))
+                        g = min(255, int(g * 1.2))
+                        b = min(255, int(b * 1.2))
 
-            color = QColor(r, g, b)
-            pen = QPen(color, 2)
-            painter.setPen(pen)
-            rect = QRect(int(x1_scaled), int(y1_scaled),
-                         int(x2_scaled - x1_scaled), int(y2_scaled - y1_scaled))
-            painter.drawRect(rect)
+                    color = QColor(r, g, b)
+                    pen = QPen(color, 2)
+                    painter.setPen(pen)
+                    rect = QRect(int(x1_scaled), int(y1_scaled),
+                                 int(x2_scaled - x1_scaled), int(y2_scaled - y1_scaled))
+                    painter.drawRect(rect)
 
-            # 绘制类别标签，背景使用标签颜色
-            font = QFont()
-            font.setBold(True)
-            font.setPointSize(10)
-            painter.setFont(font)
-            # 使用QFontMetrics来准确计算文本宽度
-            font_metrics = painter.fontMetrics()
-            text = f"{annot['class']} ({annot['confidence']:.2f})"
-            text_width = font_metrics.horizontalAdvance(text)
-            text_height = font_metrics.height()
-            text_rect = QRect(int(x1_scaled), int(y1_scaled) - text_height, text_width + 4, text_height)
-            painter.fillRect(text_rect, color)
-            # 根据背景亮度自动选择文字颜色
-            luminance = (r * 0.299 + g * 0.587 + b * 0.114)
-            text_color = QColor(0, 0, 0) if luminance > 127 else QColor(255, 255, 255)
-            painter.setPen(text_color)
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+                    # 绘制类别标签，背景使用标签颜色
+                    font = QFont()
+                    font.setBold(True)
+                    font.setPointSize(10)
+                    painter.setFont(font)
+                    # 使用QFontMetrics来准确计算文本宽度
+                    font_metrics = painter.fontMetrics()
+                    
+                    # 安全地处理confidence字段
+                    if "confidence" in annot:
+                        text = f"{annot['class']} ({annot['confidence']:.2f})"
+                    else:
+                        text = annot['class']
+                        
+                    text_width = font_metrics.horizontalAdvance(text)
+                    text_height = font_metrics.height()
+                    
+                    # 确保文本框不会超出控件范围
+                    text_x = max(0, int(x1_scaled))
+                    text_y = max(0, int(y1_scaled) - text_height)
+                    text_rect = QRect(text_x, text_y, text_width + 4, text_height)
+                    painter.fillRect(text_rect, color)
+                    
+                    # 根据背景亮度自动选择文字颜色
+                    luminance = (r * 0.299 + g * 0.587 + b * 0.114)
+                    text_color = QColor(0, 0, 0) if luminance > 127 else QColor(255, 255, 255)
+                    painter.setPen(text_color)
+                    painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+                except Exception as e:
+                    logger.error(f"绘制标注时出错: {str(e)}")
+                    continue
 
         # 如果有选中的框，绘制控制点
-        if 0 <= self.current_box_idx < len(self.annotations):
-            annot = self.annotations[self.current_box_idx]
-            x1, y1, x2, y2 = annot["box"]
-            x1_scaled = x1 * scale_x + pixmap_x
-            y1_scaled = y1 * scale_y + pixmap_y
-            x2_scaled = x2 * scale_x + pixmap_x
-            y2_scaled = y2 * scale_y + pixmap_y
+        try:
+            if 0 <= self.current_box_idx < len(self.annotations):
+                annot = self.annotations[self.current_box_idx]
+                # 检查标注数据的有效性
+                if isinstance(annot, dict) and "box" in annot:
+                    x1, y1, x2, y2 = annot["box"]
+                    x1_scaled = x1 * scale_x + pixmap_x
+                    y1_scaled = y1 * scale_y + pixmap_y
+                    x2_scaled = x2 * scale_x + pixmap_x
+                    y2_scaled = y2 * scale_y + pixmap_y
 
-            # 绘制四个角的控制点，使用黄色
-            control_size = 8
-            points = [
-                (x1_scaled, y1_scaled),  # top-left
-                (x2_scaled, y1_scaled),  # top-right
-                (x1_scaled, y2_scaled),  # bottom-left
-                (x2_scaled, y2_scaled)  # bottom-right
-            ]
+                    # 绘制四个角的控制点，使用黄色
+                    control_size = 8
+                    points = [
+                        (x1_scaled, y1_scaled),  # top-left
+                        (x2_scaled, y1_scaled),  # top-right
+                        (x1_scaled, y2_scaled),  # bottom-left
+                        (x2_scaled, y2_scaled)  # bottom-right
+                    ]
 
-            painter.setPen(QPen(QColor(255, 255, 0), 2))
-            painter.setBrush(QColor(255, 255, 255))
-            for (x, y) in points:
-                painter.drawEllipse(int(x - control_size / 2), int(y - control_size / 2),
-                                    control_size, control_size)
+                    painter.setPen(QPen(QColor(255, 255, 0), 2))
+                    painter.setBrush(QColor(255, 255, 255))
+                    for (x, y) in points:
+                        # 确保坐标有效
+                        try:
+                            painter.drawEllipse(int(x - control_size / 2), int(y - control_size / 2),
+                                                control_size, control_size)
+                        except Exception:
+                            logger.warning(f"绘制控制点失败: ({x}, {y})")
+        except Exception as e:
+            logger.error(f"绘制控制点时出错: {str(e)}")
 
     def mousePressEvent(self, event):
         """鼠标按下事件，用于选择和拖动标注框"""

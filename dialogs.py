@@ -1,3 +1,6 @@
+import logging
+from typing import List, Tuple
+
 from PySide6.QtGui import (QColor)
 from PySide6.QtWidgets import (QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox,
                                QInputDialog, QFormLayout,
@@ -6,6 +9,9 @@ from PySide6.QtWidgets import (QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QW
                                QAbstractItemView, QColorDialog, QLineEdit, QDialogButtonBox)
 
 from utils import generate_distinct_colors
+
+# 配置日志记录
+logger = logging.getLogger(__name__)
 
 
 class DatasetSplitDialog(QDialog):
@@ -30,8 +36,12 @@ class DatasetSplitDialog(QDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
-    def get_ratios(self):
-        """获取用户设置的比例，返回小数形式"""
+    def get_ratios(self) -> Tuple[float, float, float] or None:
+        """获取用户设置的比例，返回小数形式
+        
+        Returns:
+            包含(train_ratio, val_ratio, test_ratio)的元组，或者验证失败时返回None
+        """
         try:
             train = float(self.train_ratio.text()) / 100
             val = float(self.val_ratio.text()) / 100
@@ -39,22 +49,25 @@ class DatasetSplitDialog(QDialog):
             # 检查比例之和是否为100%左右（允许微小误差）
             if not (0.99 <= train + val + test <= 1.01):
                 QMessageBox.warning(self, "比例错误", "比例之和必须为100%")
+                logger.warning(f"数据集划分比例总和不为100%，当前总和: {(train + val + test) * 100:.2f}%")
                 return None
+            logger.info(f"数据集划分配置: 训练集={train:.2f}, 验证集={val:.2f}, 测试集={test:.2f}")
             return train, val, test
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的数字")
+            logger.error("数据集划分输入不是有效数字")
             return None
 
 
 class ClassManagementDialog(QDialog):
     """标签管理对话框，支持颜色设置"""
 
-    def __init__(self, class_names, class_colors, parent=None):
+    def __init__(self, class_names: List[str], class_colors: List[tuple[int, int, int]], parent=None):
         super().__init__(parent)
 
         # 在__init__中定义所有实例属性
-        self.class_names = []
-        self.class_colors = []
+        self.class_names: List[str] = []
+        self.class_colors: List[tuple[int, int, int]] = []
 
         self.setWindowTitle("标签管理")
         self.setGeometry(200, 200, 500, 300)
@@ -117,7 +130,7 @@ class ClassManagementDialog(QDialog):
 
         self.update_table()
 
-    def update_table(self):
+    def update_table(self) -> None:
         """更新标签表格，包括颜色显示"""
         self.class_table.setRowCount(len(self.class_names))
         for i, (class_name, color) in enumerate(zip(self.class_names, self.class_colors)):
@@ -141,7 +154,7 @@ class ClassManagementDialog(QDialog):
             color_layout.addStretch()
             self.class_table.setCellWidget(i, 2, color_widget)
 
-    def add_class(self):
+    def add_class(self) -> None:
         """添加新标签，自动生成颜色"""
         class_name, ok = QInputDialog.getText(self, "添加标签", "请输入标签名称:")
         if ok and class_name and class_name not in self.class_names:
@@ -150,22 +163,34 @@ class ClassManagementDialog(QDialog):
             new_colors = generate_distinct_colors(len(self.class_names))
             self.class_colors = new_colors
             self.update_table()
+            logger.info(f"添加新标签: {class_name}")
+        elif class_name in self.class_names:
+            QMessageBox.warning(self, "警告", f"标签 '{class_name}' 已存在")
+            logger.warning(f"尝试添加已存在的标签: {class_name}")
 
-    def edit_class(self):
+    def edit_class(self) -> None:
         """编辑选中的标签"""
         current_row = self.class_table.currentRow()
         if 0 <= current_row < len(self.class_names):
             old_name = self.class_names[current_row]
             new_name, ok = QInputDialog.getText(
                 self, "编辑标签", "请输入新的标签名称:", text=old_name)
-            if ok and new_name and new_name not in self.class_names:
-                self.class_names[current_row] = new_name
-                self.update_table()
+            if ok and new_name:
+                if new_name in self.class_names:
+                    QMessageBox.warning(self, "警告", f"标签 '{new_name}' 已存在")
+                    logger.warning(f"尝试编辑标签为已存在的名称: {new_name}")
+                else:
+                    self.class_names[current_row] = new_name
+                    self.update_table()
+                    logger.info(f"标签编辑: {old_name} -> {new_name}")
+        else:
+            QMessageBox.warning(self, "警告", "请先选择要编辑的标签")
 
-    def change_color(self):
+    def change_color(self) -> None:
         """修改选中标签的颜色"""
         current_row = self.class_table.currentRow()
         if 0 <= current_row < len(self.class_names):
+            class_name = self.class_names[current_row]
             current_color = self.class_colors[current_row]
             # 打开颜色选择对话框
             color = QColorDialog.getColor(
@@ -173,16 +198,21 @@ class ClassManagementDialog(QDialog):
                 self, "选择标签颜色"
             )
             if color.isValid():
-                self.class_colors[current_row] = (color.red(), color.green(), color.blue())
+                new_color = (color.red(), color.green(), color.blue())
+                self.class_colors[current_row] = new_color
                 self.update_table()
+                logger.info(f"更新标签颜色: {class_name} -> RGB{new_color}")
+        else:
+            QMessageBox.warning(self, "警告", "请先选择要修改颜色的标签")
 
-    def remove_class(self):
+    def remove_class(self) -> None:
         """删除选中的标签"""
         current_row = self.class_table.currentRow()
         if 0 <= current_row < len(self.class_names):
+            class_name = self.class_names[current_row]
             reply = QMessageBox.question(
                 self, "确认删除",
-                f"确定要删除标签 '{self.class_names[current_row]}' 吗?",
+                f"确定要删除标签 '{class_name}' 吗?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
@@ -191,12 +221,20 @@ class ClassManagementDialog(QDialog):
                 # 重新生成所有颜色，确保视觉差异
                 self.class_colors = generate_distinct_colors(len(self.class_names))
                 self.update_table()
+                logger.info(f"删除标签: {class_name}")
+        else:
+            QMessageBox.warning(self, "警告", "请先选择要删除的标签")
 
-    def auto_generate_colors(self):
+    def auto_generate_colors(self) -> None:
         """为所有标签自动生成颜色"""
         self.class_colors = generate_distinct_colors(len(self.class_names))
         self.update_table()
+        logger.info("为所有标签自动生成了新颜色")
 
-    def get_class_info(self):
-        """返回修改后的标签列表和颜色列表"""
+    def get_class_info(self) -> Tuple[List[str], List[tuple[int, int, int]]]:
+        """返回修改后的标签列表和颜色列表
+        
+        Returns:
+            包含标签名称列表和颜色列表的元组
+        """
         return self.class_names, self.class_colors

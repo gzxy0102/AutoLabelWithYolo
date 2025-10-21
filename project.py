@@ -1,12 +1,18 @@
 import os
 import json
+import logging
+from typing import Dict, List, Tuple, Optional, Any
 from utils import generate_distinct_colors
+
+# 配置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class Project:
     """项目类，管理项目信息和设置，包括标签颜色和缓存标注信息"""
 
-    def __init__(self, name=None, path=None):
+    def __init__(self, name: Optional[str] = None, path: Optional[str] = None):
         # 基本项目信息
         self.name = name if name else "未命名项目"
         self.path = path  # 项目文件(.yap)路径
@@ -26,7 +32,10 @@ class Project:
 
         # 标注数据缓存
         self.image_paths = []  # 图片路径列表
-        self.processed_images = {}  # 存储处理过的图片 {路径: (原图, 标注)}
+        self.processed_images: Dict[str, Tuple[Optional[Any], List[Dict]]] = {}  # 存储处理过的图片 {路径: (原图, 标注)}
+        
+        # 添加已标注图片的快速查找集合
+        self._labeled_images = set()
 
     @property
     def has_image_dir(self):
@@ -43,12 +52,16 @@ class Project:
         """检查是否设置了输出目录"""
         return bool(self.output_dir)
 
-    def save(self, path=None):
+    def save(self, path: Optional[str] = None) -> bool:
         """保存项目到文件，缓存标注信息"""
         if path:
             self.path = path
         if not self.path:
+            logger.error("无法保存项目：路径未设置")
             return False
+
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
 
         # 辅助函数：将NumPy类型转换为Python原生类型
         def convert_numpy_types(obj):
@@ -85,13 +98,18 @@ class Project:
         try:
             with open(self.path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"项目保存成功: {self.path}")
             return True
         except Exception as e:
-            print(f"保存项目失败: {e}")
+            logger.error(f"保存项目失败: {e}")
             return False
 
-    def load(self, path):
+    def load(self, path: str) -> bool:
         """从文件加载项目，恢复缓存的标注信息"""
+        if not os.path.exists(path):
+            logger.error(f"无法加载项目：文件不存在 - {path}")
+            return False
+            
         self.path = path
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -110,35 +128,59 @@ class Project:
             if len(self.class_colors) != len(self.class_names):
                 self.class_colors = generate_distinct_colors(len(self.class_names))
 
-            # 只加载标注信息，图像需要重新加载
+            # 重置数据结构
             self.processed_images = {}
+            self._labeled_images = set()
+            
+            # 只加载标注信息，图像需要重新加载
             annotations = data.get("annotations", {})
             for path, anns in annotations.items():
                 # 检查图像文件是否存在
                 if os.path.exists(path):
                     self.processed_images[path] = (None, anns)  # 图像为None，需要时再加载
+                    # 更新已标注图片集合
+                    if anns and len(anns) > 0:
+                        self._labeled_images.add(path)
 
+            logger.info(f"项目加载成功: {self.path}")
             return True
+        except json.JSONDecodeError as e:
+            logger.error(f"项目文件格式错误: {e}")
+            return False
         except Exception as e:
-            print(f"加载项目失败: {e}")
+            logger.error(f"加载项目失败: {e}")
             return False
 
     @property
-    def processed_count(self):
+    def processed_count(self) -> int:
         """获取已处理（有标注信息）的图片数量"""
-        # 使用集合提高查找性能
-        image_paths_set = set(self.image_paths)
-        count = 0
-        # 只检查当前项目中的图片路径
-        for path in self.processed_images:
-            if path in image_paths_set and self.has_annotations(path):
-                count += 1
-        return count
+        # 使用集合快速查找已标注的图片
+        return len(self._labeled_images)
+        
+    def update_labeled_status(self, image_path: str, has_annotations: bool) -> None:
+        """更新图片的标注状态"""
+        if has_annotations:
+            self._labeled_images.add(image_path)
+        elif image_path in self._labeled_images:
+            self._labeled_images.remove(image_path)
 
     @property
-    def remaining_count(self):
+    def remaining_count(self) -> int:
         """获取剩余未处理的图片数量"""
-        return self.total_count - self.last_processed_index
+        # 使用max确保不会出现负数
+        return max(0, self.total_count - self.last_processed_index)
+    
+    def add_image_annotation(self, image_path: str, image: Optional[Any], annotations: List[Dict]) -> None:
+        """添加或更新图片的标注信息"""
+        self.processed_images[image_path] = (image, annotations)
+        # 更新标注状态
+        self.update_labeled_status(image_path, len(annotations) > 0)
+    
+    def remove_image_annotation(self, image_path: str) -> None:
+        """移除图片的标注信息"""
+        if image_path in self.processed_images:
+            del self.processed_images[image_path]
+            self.update_labeled_status(image_path, False)
 
     @property
     def total_count(self):
@@ -157,12 +199,19 @@ class Project:
             return 0
         return int((self.last_processed_index / self.total_count) * 100)
 
-    def has_annotations(self, image_path):
+    def has_annotations(self, image_path: str) -> bool:
         """检查图片是否有标注信息"""
+        # 快速检查：先看是否在已标注集合中
+        if image_path in self._labeled_images:
+            return True
+            
         if image_path in self.processed_images:
             _, annotations = self.processed_images[image_path]
             # 添加类型检查，确保annotations不是None
-            return annotations is not None and len(annotations) > 0
+            has_annots = annotations is not None and len(annotations) > 0
+            # 更新标注状态缓存
+            self.update_labeled_status(image_path, has_annots)
+            return has_annots
         return False
 
     def get_image_name(self, image_path):
