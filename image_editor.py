@@ -37,6 +37,9 @@ class ImageEditor(QLabel):
         
         # 缓存颜色字典，提高查找性能
         self._color_cache: Dict[str, Tuple[int, int, int]] = {}
+        
+        # 添加窗口关闭标志
+        self.closing: bool = False
 
         self.init_ui()
 
@@ -124,12 +127,15 @@ class ImageEditor(QLabel):
             return default_color
 
     def paintEvent(self, event):
-        """绘制事件，用于显示图片和带颜色的标注框"""
-        super().paintEvent(event)
-        
+        # 在窗口关闭时避免绘制
+        if self.closing:
+            return
+            
         # 添加基本条件检查
         if self.q_image is None:
             return
+        """绘制事件，用于显示图片和带颜色的标注框"""
+        super().paintEvent(event)
             
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)

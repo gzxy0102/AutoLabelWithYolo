@@ -8,47 +8,21 @@ dependencies = [
     "numpy>=2.3.2",
     "opencv-python>=4.11.0.86",
     "pyside6>=6.9.1",
+    "sympy==1.13.3",
     "ultralytics>=8.3.183",
-]
-
-[project.optional-dependencies]
-cpu = [
-    "torch>=2.3.1",
-    "torchvision"
-]
-cuda = [
-    "torch>=2.3.1",
-    "torchvision"
-]
-
-[tool.uv]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "cuda" },
-    ],
+    "torch~=2.7.1",
+    "torchvision==0.22.1"
 ]
 
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cuda", extra = "cuda" },
-]
-torchvision = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cuda", extra = "cuda" },
-]
+torch = { "index" = "pytorch" }
+torchvision = { "index" = "pytorch" }
 
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 default = true
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cuda"
+name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true

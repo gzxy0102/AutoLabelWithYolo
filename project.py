@@ -35,7 +35,7 @@ class Project:
         self.processed_images: Dict[str, Tuple[Optional[Any], List[Dict]]] = {}  # 存储处理过的图片 {路径: (原图, 标注)}
         
         # 添加已标注图片的快速查找集合
-        self._labeled_images = set()
+        self.labeled_images = set()
 
     @property
     def has_image_dir(self):
@@ -130,7 +130,7 @@ class Project:
 
             # 重置数据结构
             self.processed_images = {}
-            self._labeled_images = set()
+            self.labeled_images = set()
             
             # 只加载标注信息，图像需要重新加载
             annotations = data.get("annotations", {})
@@ -140,7 +140,7 @@ class Project:
                     self.processed_images[path] = (None, anns)  # 图像为None，需要时再加载
                     # 更新已标注图片集合
                     if anns and len(anns) > 0:
-                        self._labeled_images.add(path)
+                        self.labeled_images.add(path)
 
             logger.info(f"项目加载成功: {self.path}")
             return True
@@ -155,14 +155,14 @@ class Project:
     def processed_count(self) -> int:
         """获取已处理（有标注信息）的图片数量"""
         # 使用集合快速查找已标注的图片
-        return len(self._labeled_images)
+        return len(self.labeled_images)
         
     def update_labeled_status(self, image_path: str, has_annotations: bool) -> None:
         """更新图片的标注状态"""
         if has_annotations:
-            self._labeled_images.add(image_path)
-        elif image_path in self._labeled_images:
-            self._labeled_images.remove(image_path)
+            self.labeled_images.add(image_path)
+        elif image_path in self.labeled_images:
+            self.labeled_images.remove(image_path)
 
     @property
     def remaining_count(self) -> int:
@@ -202,7 +202,7 @@ class Project:
     def has_annotations(self, image_path: str) -> bool:
         """检查图片是否有标注信息"""
         # 快速检查：先看是否在已标注集合中
-        if image_path in self._labeled_images:
+        if image_path in self.labeled_images:
             return True
             
         if image_path in self.processed_images:

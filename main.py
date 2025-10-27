@@ -10,18 +10,23 @@ from ui import YOLOAnnotationTool
 # 配置根日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(os.path.dirname(__file__), 'auto_label_tool.log')),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler(
+            os.path.join(os.path.dirname(__file__), "auto_label_tool.log")
+        ),
+        logging.StreamHandler(),
+    ],
 )
 
 logger = logging.getLogger(__name__)
 
-def setup_app_icon(app: QApplication, window: Optional[YOLOAnnotationTool] = None) -> None:
+
+def setup_app_icon(
+    app: QApplication, window: Optional[YOLOAnnotationTool] = None
+) -> None:
     """设置应用程序和窗口图标
-    
+
     Args:
         app: QApplication实例
         window: YOLOAnnotationTool窗口实例（可选）
@@ -38,6 +43,7 @@ def setup_app_icon(app: QApplication, window: Optional[YOLOAnnotationTool] = Non
             logger.warning(f"设置图标时出错: {str(e)}")
     else:
         logger.warning(f"未找到图标文件: {icon_path}")
+
 
 def main() -> None:
     """应用程序主入口"""
@@ -66,17 +72,9 @@ def main() -> None:
         sys.exit(app.exec())
 
     except Exception as e:
-        logger.critical(f"应用程序启动失败: {str(e)}", exc_info=True)
-        # 显示错误对话框
-        from PySide6.QtWidgets import QMessageBox
-        error_app = QApplication(sys.argv)
-        QMessageBox.critical(
-            None,
-            "启动错误",
-            f"应用程序启动失败:\n{str(e)}",
-            QMessageBox.StandardButton.Ok
-        )
+        logger.exception(f"应用程序启动失败: {str(e)}", exc_info=True)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
